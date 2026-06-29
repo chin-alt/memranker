@@ -1,94 +1,129 @@
 # MemReranker-style Pointwise Distillation
 
-这是一个小规模的 **MemReranker Stage 2 pointwise BCE distillation** 领域复现项目。它不从零训练大模型，而是基于 `Qwen/Qwen3-Reranker-0.6B`，使用已有的 query-doc-score 数据做 soft-label 蒸馏。
+This repository is a small-scale, runnable reproduction of the MemReranker
+Stage 2 idea: pointwise BCE distillation for domain reranking.
 
-输入格式是：
+It does not train a large model from scratch. It starts from a Qwen3 reranker
+checkpoint, formats each sample as instruction + query + document, and fits
+soft teacher labels from your query-doc-score data.
 
-```text
-<Instruct>: {instruction}
-<Query>: {query}
-<Document>: {doc}
-```
-
-训练标签来自数据中的 `labels` 字段，原始范围按 0-10 处理，训练时转换为 `labels / 10.0` 并 clip 到 `[0, 1]`。`reason` 字段默认不参与训练，只保留在 debug、case study 和预测输出里。
-
-## 和原论文的差异
-
-本项目复现的是论文方法里最适合小数据落地的 Stage 2：
-
-- 不复现 Stage 0 Rank-DistiLLM 数据训练。
-- 不复现 Stage 1 GPT/Qwen ensemble pairwise label generation。
-- 不完整复现 Stage 3 InfoNCE，对比学习可作为后续扩展。
-- 使用你已有的约 14150 条 query-doc-score 数据作为 teacher soft labels。
-
-论文原始规模约为 1M+50K pairs，且公开材料不包含完整训练数据与训练脚本，所以这里提供的是可运行、可对比 baseline 的领域微调复现。
-
-## 项目结构
+Default base model:
 
 ```text
-requirements.txt
-src/data.py
-src/modeling.py
-src/train_pointwise.py
-src/evaluate.py
-src/predict.py
-src/metrics.py
-scripts/train_qwen3_reranker_06b.sh
-scripts/eval_baseline.sh
-scripts/predict_example.sh
+Qwen/Qwen3-Reranker-0.6B
 ```
 
-## 数据格式
+The 8-GPU script targets:
 
-支持 `.jsonl` 和 JSON 数组：
+```text
+Qwen/Qwen3-Reranker-4B
+```
+
+## What Is Reproduced
+
+This project focuses on MemReranker Stage 2:
+
+- Student initialized from a Qwen3-Reranker checkpoint.
+- Input text is instruction + query + document.
+- The model predicts a query-document relevance score.
+- Training uses pointwise BCE soft-label distillation.
+- Original `labels` are treated as 0-10 scores and normalized as `labels / 10.0`.
+- Labels are clipped to `[0, 1]`.
+- `reason` is not used for training; it is kept for debugging and case study output.
+
+Differences from the original paper:
+
+- Stage 0 Rank-DistiLLM data training is not reproduced.
+- Stage 1 GPT/Qwen ensemble pairwise label generation is not reproduced.
+- Stage 3 InfoNCE is not fully reproduced.
+- This project uses your existing query-doc-score data as teacher soft labels.
+
+## Data Format
+
+JSONL and JSON arrays are supported.
 
 ```json
 {
-  "instruction": "请根据用户查询判断文档相关性，分数越高越相关。",
-  "query": "我刚才看的口袋相机哪款配送速度更快",
-  "doc": "title: Pocket Camera A, type: product, abstract: 次日达，轻便相机。",
-  "reason": "文档包含配送速度。",
+  "instruction": "Score whether the document answers the query.",
+  "query": "Which pocket camera I viewed ships faster?",
+  "doc": "title: Pocket Camera A, type: product, abstract: Ships tomorrow.",
+  "reason": "The document mentions delivery speed.",
   "labels": 9.475
 }
 ```
 
-如果数据中有 `query_id`，训练/评估会优先用 `query_id` 分组；没有时使用 query 文本本身作为 group key。默认切分 train/dev/test 时按 query 分组，避免同一个 query 泄漏到不同 split。
+If `query_id` exists, it is used as the group key. Otherwise, the raw `query`
+string is used. Grouping matters for both split leakage prevention and ranking
+metrics.
 
-`doc` 缺失时，代码会尝试用 `title`、`type`、`abstract`、`content`、`text`、`memory` 拼出文档文本。
+If `doc` is missing, the loader tries to build a document string from fields
+such as `title`, `type`, `abstract`, `content`, `text`, and `memory`.
 
-## 安装
+## Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-如果使用 QLoRA，需要 Linux CUDA 环境下的 `bitsandbytes`。Windows 本地更适合做数据和脚本 smoke test，真实训练建议放到集群 GPU。
+For QLoRA, use a Linux CUDA environment with `bitsandbytes`.
 
-## Baseline 评估
+## Fixed Train/Dev/Test Split
 
-直接用未微调的 `Qwen/Qwen3-Reranker-0.6B` 在测试集上预测：
-
-```bash
-TEST_FILE=/path/to/test.jsonl bash scripts/eval_baseline.sh
-```
-
-输出目录默认是 `outputs/baseline_qwen3_reranker_06b`，包含：
-
-- `overall_metrics.json`
-- `per_query_metrics.jsonl`
-- `predictions.jsonl`
-
-## 训练
+For formal experiments, first export fixed split files with a fixed seed:
 
 ```bash
-TRAIN_FILE=/path/to/all_data.jsonl OUTPUT_DIR=outputs/qwen3_reranker_06b_lora bash scripts/train_qwen3_reranker_06b.sh
+python src/split_data.py \
+  --input_file data/all.jsonl \
+  --output_dir data/split_seed42 \
+  --seed 42 \
+  --eval_ratio 0.1 \
+  --test_ratio 0.1
 ```
 
-等价 Python 命令：
+Or use the helper script:
+
+```bash
+INPUT_FILE=data/all.jsonl OUTPUT_DIR=data/split_seed42 bash scripts/split_data.sh
+```
+
+This writes:
+
+```text
+data/split_seed42/train.jsonl
+data/split_seed42/dev.jsonl
+data/split_seed42/test.jsonl
+data/split_seed42/split_info.json
+data/split_seed42/splits.json
+```
+
+The split is by query group, so the same `query_id` or same `query` text will
+not appear in multiple splits. The original JSON fields are preserved.
+
+## Baseline Evaluation
+
+Evaluate the unfinetuned 0.6B model on the fixed test split:
+
+```bash
+TEST_FILE=data/split_seed42/test.jsonl \
+OUTPUT_DIR=outputs/baseline_qwen3_reranker_06b \
+bash scripts/eval_baseline.sh
+```
+
+Outputs:
+
+```text
+overall_metrics.json
+per_query_metrics.jsonl
+predictions.jsonl
+```
+
+## Train 0.6B LoRA
 
 ```bash
 python src/train_pointwise.py \
-  --train_file /path/to/all_data.jsonl \
+  --train_file data/split_seed42/train.jsonl \
+  --dev_file data/split_seed42/dev.jsonl \
+  --test_file data/split_seed42/test.jsonl \
   --output_dir outputs/qwen3_reranker_06b_lora \
   --model_name_or_path Qwen/Qwen3-Reranker-0.6B \
   --max_length 4096 \
@@ -99,103 +134,126 @@ python src/train_pointwise.py \
   --warmup_ratio 0.03 \
   --weight_decay 0.01 \
   --use_lora \
-  --bf16
+  --fp16
 ```
 
-自动模式会先尝试 `sentence_transformers.CrossEncoder` 路径；如果 Qwen3 checkpoint 与 CrossEncoder 训练接口不兼容，会回退到 `transformers AutoModelForCausalLM` 的 yes/no logits 路径：
+The script supports automatic model download from Hugging Face when the model
+name is used. If your cluster is offline, download the model first and pass the
+local path to `--model_name_or_path`.
 
-```text
-score = sigmoid(logit_yes - logit_no)
-loss = BCEWithLogitsLoss(score_logit, soft_label)
-```
+## Train 4B on 8 RTX 3090 GPUs
 
-每个 epoch 后在 dev set 上评估 `BCE`、`MSE`、`Pearson`、`Spearman`、`NDCG@1/3/10`、`MAP`、`MRR`、`Recall@1/3/5`。best checkpoint 保存到 `OUTPUT_DIR/best`，选择标准为优先 `NDCG@3`，并用 `BCE` 作为并列时的 tie-breaker。
-
-也可以显式传入 split：
+Use the 8-GPU helper:
 
 ```bash
-python src/train_pointwise.py \
-  --train_file /path/to/all_data.jsonl \
-  --split_file /path/to/splits.json \
-  --output_dir outputs/run
+TRAIN_FILE=data/split_seed42/train.jsonl \
+DEV_FILE=data/split_seed42/dev.jsonl \
+TEST_FILE=data/split_seed42/test.jsonl \
+OUTPUT_DIR=outputs/qwen3_reranker_4b_8x3090_lora \
+bash scripts/train_qwen3_reranker_4b_8x3090.sh
 ```
 
-`splits.json` 可包含：
+The script runs:
 
-```json
-{
-  "train": ["query-or-query-id-1"],
-  "dev": ["query-or-query-id-2"],
-  "test": ["query-or-query-id-3"]
-}
+```text
+accelerate launch --num_processes 8 --mixed_precision fp16
 ```
 
-## 微调模型评估
+Important defaults for RTX 3090:
+
+- `--backend causal_lm`
+- `--model_name_or_path Qwen/Qwen3-Reranker-4B`
+- `--fp16`
+- `--use_lora`
+- `--gradient_checkpointing`
+- `--per_device_train_batch_size 1`
+- `--gradient_accumulation_steps 8`
+- `--max_length 2048`
+
+The effective batch size is:
+
+```text
+num_gpus * per_device_train_batch_size * gradient_accumulation_steps
+```
+
+With the defaults, that is `8 * 1 * 8 = 64`.
+
+If memory is still tight, reduce `MAX_LENGTH` to 1024 or add `--load_in_4bit`
+to the script command line:
+
+```bash
+bash scripts/train_qwen3_reranker_4b_8x3090.sh --load_in_4bit
+```
+
+## Finetuned Evaluation
+
+Use the same fixed test split:
 
 ```bash
 python src/evaluate.py \
-  --model_path outputs/qwen3_reranker_06b_lora/best \
-  --test_file /path/to/test.jsonl \
+  --model_path outputs/qwen3_reranker_4b_8x3090_lora/best \
+  --test_file data/split_seed42/test.jsonl \
   --output_dir outputs/finetuned_eval \
-  --max_length 4096
+  --max_length 2048 \
+  --fp16
 ```
 
-对比 baseline 和 finetuned 时，比较两个目录下的 `overall_metrics.json` 即可。建议重点看 `NDCG@3`、`MRR`、`MAP`，同时关注 `BCE/MSE` 是否下降。
+Compare:
 
-NDCG 使用归一化后的 graded label，也就是 `[0, 1]` 的 soft label。MAP/MRR/Recall 需要二值 relevant，默认阈值是 normalized label `>= 0.7`，等价于原始 label `>= 7`；可通过 `--relevance_threshold` 修改。
+```text
+outputs/baseline_qwen3_reranker_06b/overall_metrics.json
+outputs/finetuned_eval/overall_metrics.json
+```
 
-## 单条推理
+Main metrics:
 
-`docs_file` 支持每行 `{"doc": "..."}`，也支持 `{"title": "...", "abstract": "..."}` 自动拼接。
+- BCE
+- MSE
+- Pearson
+- Spearman
+- MAP
+- MRR
+- NDCG@1
+- NDCG@3
+- NDCG@10
+- Recall@1
+- Recall@3
+- Recall@5
+
+NDCG uses the normalized graded label in `[0, 1]`. MAP, MRR, and Recall use a
+binary relevance threshold. The default is normalized label `>= 0.7`, equivalent
+to original label `>= 7`.
+
+## Prediction
+
+Prepare `docs.jsonl`:
+
+```json
+{"doc": "title: PocketCam A, abstract: Ships tomorrow."}
+{"title": "PocketCam B", "abstract": "Ships in two weeks."}
+```
+
+Run:
 
 ```bash
 python src/predict.py \
-  --model_path outputs/qwen3_reranker_06b_lora/best \
-  --instruction "请判断文档是否能回答用户查询，并给出相关性分数。" \
-  --query "我刚才看的口袋相机哪款配送速度更快" \
+  --model_path outputs/qwen3_reranker_4b_8x3090_lora/best \
+  --instruction "Score whether the document answers the query." \
+  --query "Which pocket camera ships faster?" \
   --docs_file docs.jsonl \
-  --top_k 10
+  --top_k 10 \
+  --output_file predictions_ranked.json \
+  --fp16
 ```
-
-输出默认写入 `predictions_ranked.json`。
-
-## 显存建议
-
-- `Qwen3-Reranker-0.6B + LoRA` 建议 24GB GPU 起步。
-- `max_length=8192` 显存压力明显更高，建议先用 2048 或 4096 跑通。
-- 显存不足时优先降低 `--max_length`、`--per_device_train_batch_size`，提高 `--gradient_accumulation_steps`。
-- 需要进一步省显存时启用 `--load_in_4bit` 走 QLoRA 路径。
-- 单卡训练优先使用 `--use_lora --bf16`；如果 GPU 不支持 bf16，改用 `--fp16`。
-
-## 常见问题
-
-**labels 不是整数怎么办？**  
-保留 soft label。比如 `9.475` 会变成 `0.9475`，直接参与 BCE soft-label distillation。
-
-**reason 是否参与训练？**  
-默认不参与。`reason` 只写入预测结果，便于 debug 和 case study。
-
-**query 没有 query_id 怎么办？**  
-使用 query 文本作为 group key，并按 group key 做切分和排序指标。
-
-**为什么不是完整复现论文？**  
-因为公开材料没有完整训练数据和训练脚本，且论文原始训练规模约为 1M+50K pairs。本项目聚焦 Stage 2 pointwise BCE distillation，适合用现有 14150 条领域数据快速验证微调收益。
 
 ## Smoke Test
 
-本仓库提供 `--mock` 词面重叠 scorer，便于在没有 GPU、没有下载模型时检查数据读取、指标和推理脚本：
+The repository supports a `--mock` scorer for local pipeline checks without a
+GPU or downloaded model:
 
 ```bash
 python src/evaluate.py --test_file tmp/smoke/toy.jsonl --output_dir tmp/smoke/eval --mock
 python src/predict.py --instruction "rank" --query "fast pocket camera delivery" --docs_file tmp/smoke/docs.jsonl --output_file tmp/smoke/predictions_ranked.json --mock
 ```
 
-真实模型训练不使用 `--mock`。
-
-本地 smoke test 已在 8 条 toy JSONL 上跑通：
-
-```text
-data split: train=5, dev=2, test=1
-mock eval: BCE=0.6777, MSE=0.0786, Pearson=0.7472, Spearman=0.4910, MAP=0.8750, MRR=0.8750, NDCG@3=0.9741
-mock predict: wrote tmp/smoke/predictions_ranked.json
-```
+The mock scorer is only for smoke tests. Do not use it for real experiments.

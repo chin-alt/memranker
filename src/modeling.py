@@ -13,6 +13,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-Reranker-0.6B"
+DEFAULT_4B_MODEL_NAME = "Qwen/Qwen3-Reranker-4B"
 ANSWER_PROMPT = "\n<Answer>:"
 
 
@@ -329,6 +330,7 @@ def load_causal_training_model(
     lora_alpha: int = 32,
     lora_dropout: float = 0.05,
     load_in_4bit: bool = False,
+    device_map: Any | None = None,
     gradient_checkpointing: bool = True,
 ) -> tuple[Any, Any]:
     if torch is None or QwenCausalReranker is None:
@@ -347,6 +349,7 @@ def load_causal_training_model(
     model_kwargs: dict[str, Any] = {
         "trust_remote_code": True,
         "torch_dtype": dtype,
+        "low_cpu_mem_usage": True,
     }
     if load_in_4bit:
         from transformers import BitsAndBytesConfig
@@ -358,7 +361,7 @@ def load_causal_training_model(
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
         )
-        model_kwargs["device_map"] = "auto"
+        model_kwargs["device_map"] = device_map if device_map is not None else "auto"
 
     model = AutoModelForCausalLM.from_pretrained(model_name_or_path, **model_kwargs)
     if gradient_checkpointing:

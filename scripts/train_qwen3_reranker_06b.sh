@@ -7,6 +7,7 @@ MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen3-Reranker-0.6B}"
 MAX_LENGTH="${MAX_LENGTH:-4096}"
 
 python src/train_pointwise.py \
+  --backend "${BACKEND:-auto}" \
   --train_file "${TRAIN_FILE}" \
   --output_dir "${OUTPUT_DIR}" \
   --model_name_or_path "${MODEL_NAME_OR_PATH}" \
