@@ -19,6 +19,8 @@ from modeling import (
     DEFAULT_MODEL_NAME,
     append_answer_prompt,
     load_causal_training_model,
+    model_load_help,
+    normalize_model_name_or_path,
     predict_causal_model,
     predict_sequence_classification_model,
     save_reranker_config,
@@ -416,18 +418,21 @@ def train_causal_lm(
 
     if accelerator.is_main_process:
         logger.info("Using causal LM yes/no-logit backend with model %s", args.model_name_or_path)
-    wrapper, tokenizer = load_causal_training_model(
-        args.model_name_or_path,
-        bf16=args.bf16,
-        fp16=args.fp16,
-        use_lora=args.use_lora,
-        lora_r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        load_in_4bit=args.load_in_4bit,
-        device_map=_kbit_device_map_for_process(args, accelerator),
-        gradient_checkpointing=args.gradient_checkpointing,
-    )
+    try:
+        wrapper, tokenizer = load_causal_training_model(
+            args.model_name_or_path,
+            bf16=args.bf16,
+            fp16=args.fp16,
+            use_lora=args.use_lora,
+            lora_r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            load_in_4bit=args.load_in_4bit,
+            device_map=_kbit_device_map_for_process(args, accelerator),
+            gradient_checkpointing=args.gradient_checkpointing,
+        )
+    except Exception as exc:
+        raise RuntimeError(model_load_help(args.model_name_or_path, exc)) from exc
 
     train_examples = splits["train"]
     eval_examples = splits["dev"] or splits["test"] or splits["train"]
@@ -533,6 +538,7 @@ def main() -> None:
         raise ValueError("--bf16 and --fp16 are mutually exclusive")
     if args.epochs < 1:
         raise ValueError("--epochs must be >= 1")
+    args.model_name_or_path = normalize_model_name_or_path(args.model_name_or_path)
 
     accelerator = create_accelerator(args)
     set_seed(args.seed)

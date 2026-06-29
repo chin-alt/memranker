@@ -67,6 +67,52 @@ pip install -r requirements.txt
 
 For QLoRA, use a Linux CUDA environment with `bitsandbytes`.
 
+If baseline logs say `No module named 'sentence_transformers'`, the environment
+has not installed this repo's full requirements yet. Run the command above
+inside the same virtual environment that runs training/evaluation.
+
+If logs say `Can't load the configuration of 'Qwen/Qwen3-Reranker-0.6B'` after
+an `httpx.ProxyError` or `504 Gateway Time-out`, the model id is probably fine;
+the machine failed to download from Hugging Face. Fix the proxy/mirror or use a
+pre-downloaded local model directory.
+
+Common model ids:
+
+```text
+Qwen/Qwen3-Reranker-0.6B
+Qwen/Qwen3-Reranker-4B
+```
+
+The code also normalizes common typos such as `qwen/qwen3-reranker-0.6` to
+`Qwen/Qwen3-Reranker-0.6B`.
+
+## Offline Model Download
+
+On a machine that can reach Hugging Face:
+
+```bash
+MODEL_NAME_OR_PATH=Qwen/Qwen3-Reranker-0.6B \
+LOCAL_DIR=models/Qwen3-Reranker-0.6B \
+bash scripts/download_qwen3_reranker.sh
+```
+
+For the 4B model:
+
+```bash
+MODEL_NAME_OR_PATH=Qwen/Qwen3-Reranker-4B \
+LOCAL_DIR=models/Qwen3-Reranker-4B \
+bash scripts/download_qwen3_reranker.sh
+```
+
+Then copy that directory to the cluster and pass it as a local path:
+
+```bash
+python src/evaluate.py \
+  --model_path /path/to/Qwen3-Reranker-0.6B \
+  --test_file data/split_seed42/test.jsonl \
+  --output_dir outputs/baseline_local_model
+```
+
 ## Fixed Train/Dev/Test Split
 
 For formal experiments, first export fixed split files with a fixed seed:

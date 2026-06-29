@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-Reranker-0.6B"
 DEFAULT_4B_MODEL_NAME = "Qwen/Qwen3-Reranker-4B"
 ANSWER_PROMPT = "\n<Answer>:"
+MODEL_NAME_ALIASES = {
+    "qwen/qwen3-reranker-0.6": DEFAULT_MODEL_NAME,
+    "qwen/qwen3-reranker-0.6b": DEFAULT_MODEL_NAME,
+    "qwen/qwen3-reranker-06b": DEFAULT_MODEL_NAME,
+    "qwen/qwen3-reranker-4": DEFAULT_4B_MODEL_NAME,
+    "qwen/qwen3-reranker-4b": DEFAULT_4B_MODEL_NAME,
+}
 
 
 try:
@@ -25,6 +32,37 @@ except Exception:  # pragma: no cover - lets mock mode work without torch.
 
 def append_answer_prompt(text: str) -> str:
     return f"{text.rstrip()}{ANSWER_PROMPT}"
+
+
+def normalize_model_name_or_path(model_name_or_path: str) -> str:
+    """Correct common Qwen3 reranker Hub ID typos without touching local paths."""
+    path = Path(model_name_or_path)
+    if path.exists():
+        return model_name_or_path
+    normalized = model_name_or_path.strip()
+    alias = MODEL_NAME_ALIASES.get(normalized.lower())
+    if alias:
+        if normalized != alias:
+            logger.warning("Normalized model name %r to %r", model_name_or_path, alias)
+        return alias
+    return normalized
+
+
+def model_load_help(model_name_or_path: str, exc: BaseException) -> str:
+    return (
+        f"Failed to load model/tokenizer from {model_name_or_path!r}: {exc}\n\n"
+        "Checklist:\n"
+        "1. Use the exact Hugging Face id, for example Qwen/Qwen3-Reranker-0.6B "
+        "or Qwen/Qwen3-Reranker-4B.\n"
+        "2. Install all dependencies: pip install -r requirements.txt\n"
+        "3. Qwen3 requires transformers>=4.51.0; the baseline CrossEncoder path also "
+        "requires sentence-transformers.\n"
+        "4. If the machine cannot reach Hugging Face, download the model on a machine "
+        "with network access and pass the local directory via --model_path or "
+        "--model_name_or_path.\n"
+        "5. If your cluster uses a proxy or mirror, fix HTTPS_PROXY/HTTP_PROXY or set "
+        "HF_ENDPOINT before running."
+    )
 
 
 def sigmoid_array(values: np.ndarray) -> np.ndarray:
@@ -96,6 +134,7 @@ class CrossEncoderScorer:
     ):
         if torch is None:
             raise RuntimeError("torch is required for CrossEncoderScorer")
+        model_name_or_path = normalize_model_name_or_path(model_name_or_path)
         path = Path(model_name_or_path)
         adapter_config = path / "adapter_config.json"
         if adapter_config.exists():
@@ -203,6 +242,7 @@ class CausalLMScorer:
             raise RuntimeError("torch is required for CausalLMScorer")
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        model_name_or_path = normalize_model_name_or_path(model_name_or_path)
         path = Path(model_name_or_path)
         adapter_config = path / "adapter_config.json"
         load_path = model_name_or_path
@@ -337,6 +377,7 @@ def load_causal_training_model(
         raise RuntimeError("torch is required for training")
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    model_name_or_path = normalize_model_name_or_path(model_name_or_path)
     dtype = torch_dtype_from_flags(bf16=bf16, fp16=fp16)
     tokenizer = AutoTokenizer.from_pretrained(
         model_name_or_path,
@@ -399,6 +440,7 @@ def load_causal_training_model(
 def detect_backend(model_path: str, requested_backend: str = "auto") -> str:
     if requested_backend != "auto":
         return requested_backend
+    model_path = normalize_model_name_or_path(model_path)
     path = Path(model_path)
     config_path = path / "reranker_config.json"
     if config_path.exists():
@@ -423,6 +465,7 @@ def load_scorer(
     if mock:
         return MockRerankerScorer(query=batch_query)
 
+    model_path = normalize_model_name_or_path(model_path)
     dtype = torch_dtype_from_flags(bf16=bf16, fp16=fp16)
     backend = detect_backend(model_path, backend)
     logger.info("Loading reranker scorer backend=%s model=%s", backend, model_path)
@@ -433,10 +476,16 @@ def load_scorer(
         except Exception as exc:
             if detect_backend(model_path, "auto") == "cross_encoder":
                 logger.warning("CrossEncoder load failed, falling back to causal LM: %s", exc)
-                return CausalLMScorer(model_path, max_length=max_length, torch_dtype=dtype)
+                try:
+                    return CausalLMScorer(model_path, max_length=max_length, torch_dtype=dtype)
+                except Exception as causal_exc:
+                    raise RuntimeError(model_load_help(model_path, causal_exc)) from causal_exc
             raise
     if backend == "causal_lm":
-        return CausalLMScorer(model_path, max_length=max_length, torch_dtype=dtype)
+        try:
+            return CausalLMScorer(model_path, max_length=max_length, torch_dtype=dtype)
+        except Exception as exc:
+            raise RuntimeError(model_load_help(model_path, exc)) from exc
     raise ValueError(f"Unknown backend: {backend}")
 
 
