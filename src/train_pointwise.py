@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from data import RerankerExample, load_dataset_splits, load_examples
 from metrics import compute_all_metrics, is_better_metric
@@ -72,6 +73,7 @@ def parse_args() -> argparse.Namespace:
     add_bool_arg(parser, "gradient_checkpointing", default=True, help_text="Enable gradient checkpointing")
     parser.add_argument("--load_in_4bit", action="store_true", help="Enable QLoRA-style 4-bit loading for causal backend.")
     parser.add_argument("--logging_steps", type=int, default=10)
+    parser.add_argument("--disable_tqdm", action="store_true", help="Disable tqdm progress bars.")
     parser.add_argument(
         "--ddp_find_unused_parameters",
         action="store_true",
@@ -360,7 +362,16 @@ def train_cross_encoder(
         model.train()
         optimizer.zero_grad(set_to_none=True)
         running_loss = 0.0
-        for step, (encoded, labels) in enumerate(loader, start=1):
+        progress = tqdm(
+            enumerate(loader, start=1),
+            total=len(loader),
+            desc=f"Epoch {epoch}/{args.epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+            ascii=True,
+            disable=args.disable_tqdm or not accelerator.is_main_process,
+        )
+        for step, (encoded, labels) in progress:
             with accelerator.accumulate(model):
                 outputs = model(**encoded)
                 logits = outputs.logits.squeeze(-1)
@@ -372,6 +383,8 @@ def train_cross_encoder(
                     optimizer.zero_grad(set_to_none=True)
 
             running_loss += float(accelerator.gather(loss.detach()).mean().cpu())
+            if accelerator.is_main_process and not args.disable_tqdm:
+                progress.set_postfix(loss=f"{running_loss / step:.4f}")
             if accelerator.is_main_process and args.logging_steps > 0 and step % args.logging_steps == 0:
                 logger.info("epoch=%d step=%d train_loss=%.6f", epoch, step, running_loss / step)
 
@@ -469,7 +482,16 @@ def train_causal_lm(
         wrapper.train()
         optimizer.zero_grad(set_to_none=True)
         running_loss = 0.0
-        for step, batch in enumerate(loader, start=1):
+        progress = tqdm(
+            enumerate(loader, start=1),
+            total=len(loader),
+            desc=f"Epoch {epoch}/{args.epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+            ascii=True,
+            disable=args.disable_tqdm or not accelerator.is_main_process,
+        )
+        for step, batch in progress:
             with accelerator.accumulate(wrapper):
                 outputs = wrapper(**batch)
                 loss = outputs["loss"]
@@ -480,6 +502,8 @@ def train_causal_lm(
                     optimizer.zero_grad(set_to_none=True)
 
             running_loss += float(accelerator.gather(loss.detach()).mean().cpu())
+            if accelerator.is_main_process and not args.disable_tqdm:
+                progress.set_postfix(loss=f"{running_loss / step:.4f}")
             if accelerator.is_main_process and args.logging_steps > 0 and step % args.logging_steps == 0:
                 logger.info("epoch=%d step=%d train_loss=%.6f", epoch, step, running_loss / step)
 

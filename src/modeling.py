@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from tqdm.auto import tqdm
 
 
 logger = logging.getLogger(__name__)
@@ -104,7 +105,13 @@ class MockRerankerScorer:
 
     def predict(self, input_texts: list[str], batch_size: int = 32) -> list[float]:
         scores = []
-        for text in input_texts:
+        for text in tqdm(
+            input_texts,
+            desc="Mock scoring",
+            unit="pair",
+            dynamic_ncols=True,
+            ascii=True,
+        ):
             query = self.query
             if "<Query>:" in text and "<Document>:" in text:
                 query = text.split("<Query>:", 1)[1].split("<Document>:", 1)[0]
@@ -303,8 +310,17 @@ def predict_sequence_classification_model(
     model.to(device)
     model.eval()
     scores: list[float] = []
+    starts = range(0, len(input_texts), batch_size)
+    total_batches = math.ceil(len(input_texts) / batch_size) if input_texts else 0
     with torch.no_grad():
-        for start in range(0, len(input_texts), batch_size):
+        for start in tqdm(
+            starts,
+            total=total_batches,
+            desc="Scoring",
+            unit="batch",
+            dynamic_ncols=True,
+            ascii=True,
+        ):
             batch = input_texts[start : start + batch_size]
             encoded = tokenizer(
                 batch,
@@ -334,8 +350,17 @@ def predict_causal_model(
     wrapper.eval()
     scores: list[float] = []
     prompts = [append_answer_prompt(text) for text in input_texts]
+    starts = range(0, len(prompts), batch_size)
+    total_batches = math.ceil(len(prompts) / batch_size) if prompts else 0
     with torch.no_grad():
-        for start in range(0, len(prompts), batch_size):
+        for start in tqdm(
+            starts,
+            total=total_batches,
+            desc="Causal scoring",
+            unit="batch",
+            dynamic_ncols=True,
+            ascii=True,
+        ):
             batch = prompts[start : start + batch_size]
             encoded = tokenizer(
                 batch,

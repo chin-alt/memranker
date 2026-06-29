@@ -113,6 +113,9 @@ python src/evaluate.py \
   --output_dir outputs/baseline_local_model
 ```
 
+All scoring and training loops use `tqdm` progress bars. For non-interactive
+logs, add `--disable_tqdm` to `src/train_pointwise.py`.
+
 ## Fixed Train/Dev/Test Split
 
 For formal experiments, first export fixed split files with a fixed seed:
@@ -151,6 +154,16 @@ Evaluate the unfinetuned 0.6B model on the fixed test split:
 
 ```bash
 TEST_FILE=data/split_seed42/test.jsonl \
+OUTPUT_DIR=outputs/baseline_qwen3_reranker_06b \
+bash scripts/eval_baseline.sh
+```
+
+If the model is already on the machine, set `MODEL_NAME_OR_PATH` to that local
+directory:
+
+```bash
+TEST_FILE=data/split_seed42/test.jsonl \
+MODEL_NAME_OR_PATH=/path/to/Qwen3-Reranker-0.6B \
 OUTPUT_DIR=outputs/baseline_qwen3_reranker_06b \
 bash scripts/eval_baseline.sh
 ```
