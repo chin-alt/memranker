@@ -88,6 +88,19 @@ an `httpx.ProxyError` or `504 Gateway Time-out`, the model id is probably fine;
 the machine failed to download from Hugging Face. Fix the proxy/mirror or use a
 pre-downloaded local model directory.
 
+If logs say a local path like `/home/.../Qwen3-Reranker-0.6B` is an invalid repo
+id, the local directory path is wrong or does not exist. Check it on the cluster
+first:
+
+```bash
+ls -lah /home/c50061497/MemOS/src/memos/reranker/memranker/models/Qwen3-Reranker-0.6B
+ls -lah /home/c50061497/MemOS/reranker/memranker/models/Qwen3-Reranker-0.6B
+```
+
+Use whichever path actually contains `config.json`, tokenizer files, and model
+weight shards. `SWIFT_ATTN_IMPL` is ignored by the paper-aligned evaluator; use
+`ATTN_IMPLEMENTATION=eager` or `ATTN_IMPLEMENTATION=flash_attention_2` instead.
+
 Common model ids:
 
 ```text

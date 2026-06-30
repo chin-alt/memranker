@@ -69,10 +69,22 @@ def parse_input_text(input_text: str) -> tuple[str, str, str]:
 
 def normalize_model_name_or_path(model_name_or_path: str) -> str:
     """Correct common Qwen3 reranker Hub ID typos without touching local paths."""
-    path = Path(model_name_or_path)
-    if path.exists():
-        return model_name_or_path
     normalized = model_name_or_path.strip()
+    path = Path(normalized).expanduser()
+    if path.exists():
+        return str(path)
+    looks_like_local_path = (
+        path.is_absolute()
+        or normalized.startswith(("/", "\\", "./", "../", "~/", ".\\", "..\\", "~\\"))
+        or bool(re.match(r"^[A-Za-z]:[\\/]", normalized))
+    )
+    if looks_like_local_path:
+        raise FileNotFoundError(
+            f"Local model path does not exist: {normalized}\n"
+            "Check the directory with `ls -lah <path>` on the training machine. "
+            "If the model is inside this repository, the path may need the "
+            "`src/memos/reranker/memranker` segment."
+        )
     alias = MODEL_NAME_ALIASES.get(normalized.lower())
     if alias:
         if normalized != alias:
