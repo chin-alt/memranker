@@ -322,6 +322,7 @@ class SwiftGenerativeRerankerScorer:
         model_name_or_path: str,
         adapters: list[str] | None = None,
         attn_impl: str = "flash_attention_2",
+        include_instruction: bool = False,
     ):
         model_name_or_path = normalize_model_name_or_path(model_name_or_path)
         try:
@@ -340,6 +341,8 @@ class SwiftGenerativeRerankerScorer:
         if adapters:
             engine_kwargs["adapters"] = adapters
         self.engine = TransformersEngine(model_name_or_path, **engine_kwargs)
+        self.include_instruction = include_instruction
+        self.raw_outputs: list[str] = []
 
     @staticmethod
     def _score_from_content(content: Any) -> float:
@@ -360,7 +363,7 @@ class SwiftGenerativeRerankerScorer:
 
     def _request_from_input_text(self, input_text: str) -> Any:
         instruction, query, doc = parse_input_text(input_text)
-        user_content = query if not instruction else f"{instruction}\n{query}"
+        user_content = f"{instruction}\n{query}" if self.include_instruction and instruction else query
         return self.InferRequest(
             messages=[
                 {"role": "user", "content": user_content},
@@ -370,6 +373,7 @@ class SwiftGenerativeRerankerScorer:
 
     def predict(self, input_texts: list[str], batch_size: int = 32) -> list[float]:
         scores: list[float] = []
+        self.raw_outputs = []
         starts = range(0, len(input_texts), batch_size)
         total_batches = math.ceil(len(input_texts) / batch_size) if input_texts else 0
         for start in tqdm(
@@ -384,7 +388,9 @@ class SwiftGenerativeRerankerScorer:
             infer_requests = [self._request_from_input_text(text) for text in batch]
             responses = self.engine.infer(infer_requests)
             for response in responses:
-                scores.append(self._score_from_content(response.choices[0].message.content))
+                content = str(response.choices[0].message.content)
+                self.raw_outputs.append(content)
+                scores.append(self._score_from_content(content))
         return scores
 
 
@@ -580,6 +586,7 @@ def load_scorer(
     mock: bool = False,
     adapters: list[str] | None = None,
     swift_attn_impl: str = "flash_attention_2",
+    swift_include_instruction: bool = False,
 ) -> Any:
     if mock:
         return MockRerankerScorer(query=batch_query)
@@ -594,6 +601,7 @@ def load_scorer(
             model_path,
             adapters=adapters,
             attn_impl=swift_attn_impl,
+            include_instruction=swift_include_instruction,
         )
     if backend == "cross_encoder":
         try:

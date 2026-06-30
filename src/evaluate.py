@@ -27,6 +27,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--default_instruction", default="")
     parser.add_argument("--adapters", nargs="*", default=None, help="Optional ms-swift adapter paths for --backend swift.")
     parser.add_argument("--swift_attn_impl", default="flash_attention_2")
+    parser.add_argument(
+        "--swift_include_instruction",
+        action="store_true",
+        help="For --backend swift, prepend instruction to the query. Default keeps official query/doc format.",
+    )
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--mock", action="store_true", help="Use lexical mock scorer for smoke tests.")
@@ -49,6 +54,7 @@ def main() -> None:
         mock=args.mock,
         adapters=args.adapters,
         swift_attn_impl=args.swift_attn_impl,
+        swift_include_instruction=args.swift_include_instruction,
     )
 
     input_texts = [ex.input_text for ex in examples]
@@ -72,19 +78,21 @@ def main() -> None:
     )
 
     rows = []
+    raw_outputs = getattr(scorer, "raw_outputs", None)
     for ex, score in zip(examples, scores, strict=False):
-        rows.append(
-            {
-                "group_key": ex.group_key,
-                "query": ex.query,
-                "query_id": ex.query_id,
-                "doc": ex.doc,
-                "label": ex.label,
-                "raw_label": ex.raw_label,
-                "score": float(score),
-                "reason": ex.reason,
-            }
-        )
+        row = {
+            "group_key": ex.group_key,
+            "query": ex.query,
+            "query_id": ex.query_id,
+            "doc": ex.doc,
+            "label": ex.label,
+            "raw_label": ex.raw_label,
+            "score": float(score),
+            "reason": ex.reason,
+        }
+        if raw_outputs is not None and len(raw_outputs) == len(scores):
+            row["raw_score_output"] = raw_outputs[len(rows)]
+        rows.append(row)
     rows = add_group_ranks(rows, query_key="group_key")
     overall, per_query = compute_all_metrics(
         rows,

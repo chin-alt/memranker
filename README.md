@@ -223,6 +223,20 @@ OUTPUT_DIR=outputs/baseline_qwen3_reranker_06b_swift \
 bash scripts/eval_baseline_swift.sh
 ```
 
+The swift backend follows the official query/document message shape by default:
+`user=query`, `assistant=document`. It does not prepend the long `instruction`
+to the query unless you explicitly add:
+
+```bash
+--swift_include_instruction
+```
+
+If metrics drop sharply, inspect `predictions.jsonl`. Swift runs include
+`raw_score_output` so you can verify whether the backend is returning numeric
+scores, `yes/no`, empty text, or another format. If many rows have score `0.0`
+and non-numeric `raw_score_output`, the parser is not reading the intended
+reranker score and ranking metrics will collapse.
+
 If `flash_attention_2` is not available in the environment, override the
 attention implementation:
 

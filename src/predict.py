@@ -27,6 +27,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--adapters", nargs="*", default=None, help="Optional ms-swift adapter paths for --backend swift.")
     parser.add_argument("--swift_attn_impl", default="flash_attention_2")
+    parser.add_argument(
+        "--swift_include_instruction",
+        action="store_true",
+        help="For --backend swift, prepend instruction to the query. Default keeps official query/doc format.",
+    )
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--mock", action="store_true", help="Use lexical mock scorer for smoke tests.")
@@ -69,19 +74,22 @@ def main() -> None:
         mock=args.mock,
         adapters=args.adapters,
         swift_attn_impl=args.swift_attn_impl,
+        swift_include_instruction=args.swift_include_instruction,
     )
     scores = scorer.predict(input_texts, batch_size=args.batch_size)
 
     ranked = []
+    raw_outputs = getattr(scorer, "raw_outputs", None)
     for row, score in zip(docs, scores, strict=False):
-        ranked.append(
-            {
-                "doc": row["doc"],
-                "score": float(score),
-                "source_index": row["source_index"],
-                "raw": row["raw"],
-            }
-        )
+        item = {
+            "doc": row["doc"],
+            "score": float(score),
+            "source_index": row["source_index"],
+            "raw": row["raw"],
+        }
+        if raw_outputs is not None and len(raw_outputs) == len(scores):
+            item["raw_score_output"] = raw_outputs[len(ranked)]
+        ranked.append(item)
     ranked.sort(key=lambda item: item["score"], reverse=True)
     for idx, row in enumerate(ranked, start=1):
         row["rank"] = idx
