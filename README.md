@@ -341,6 +341,84 @@ NDCG uses the normalized graded label in `[0, 1]`. MAP, MRR, and Recall use a
 binary relevance threshold. The default is normalized label `>= 0.7`, equivalent
 to original label `>= 7`.
 
+## Business Evaluation
+
+For business recall data, use `src/evaluate_business.py`. It builds the same
+reranker input used in training:
+
+```text
+<Instruct>: {instruction}
+<Query>: {query}
+<Document>: {doc}
+```
+
+The model layer then wraps that block with the Qwen3-Reranker chat prefix and
+scores the final `yes/no` logits. Do not pass ad-hoc text such as
+`query: ... document: ...` directly if you want scores to match training.
+
+Ground truth is an Excel or CSV file. Defaults:
+
+```text
+query column: query
+doc id column: PageId
+```
+
+Recall JSON may be either:
+
+```json
+{
+  "winter down jacket": [
+    {"id": "page_1", "text": "productName: ..."},
+    {"id": "page_2", "text": "productName: ..."}
+  ]
+}
+```
+
+or a list of rows with `query` and `docs`/`documents`.
+
+Run:
+
+```bash
+GT_FILE=data/business/ground_truth.xlsx \
+RECALL_FILE=data/business/recall.json \
+MODEL_PATH=outputs/qwen3_reranker_06b_lora/best \
+OUTPUT_DIR=outputs/business_eval \
+MAX_LENGTH=2048 \
+BATCH_SIZE=16 \
+ATTN_IMPLEMENTATION=flash_attention_2 \
+bash scripts/eval_business.sh
+```
+
+If your Excel columns or recall JSON keys differ:
+
+```bash
+python src/evaluate_business.py \
+  --gt_file data/business/ground_truth.xlsx \
+  --recall_file data/business/recall.json \
+  --gt_query_col query \
+  --gt_doc_id_col PageId \
+  --gt_sheet Sheet1 \
+  --recall_id_key id \
+  --recall_text_key text \
+  --model_path outputs/qwen3_reranker_06b_lora/best \
+  --output_dir outputs/business_eval \
+  --max_length 2048 \
+  --batch_size 16 \
+  --attn_implementation flash_attention_2 \
+  --fp16
+```
+
+Outputs:
+
+```text
+metrics.json
+per_query_metrics.jsonl
+predictions.jsonl
+```
+
+Business metrics are averaged over all ground-truth queries, so a query with no
+matched recalled docs contributes zero instead of silently disappearing.
+
 ## Prediction
 
 Prepare `docs.jsonl`:
