@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-Reranker-0.6B"
 DEFAULT_4B_MODEL_NAME = "Qwen/Qwen3-Reranker-4B"
 ANSWER_PROMPT = "\n<Answer>:"
+INPUT_RE = re.compile(
+    r"<Instruct>:\s*(?P<instruction>.*?)\s*<Query>:\s*(?P<query>.*?)\s*<Document>:\s*(?P<doc>.*)",
+    re.DOTALL,
+)
 MODEL_NAME_ALIASES = {
     "qwen/qwen3-reranker-0.6": DEFAULT_MODEL_NAME,
     "qwen/qwen3-reranker-0.6b": DEFAULT_MODEL_NAME,
@@ -33,6 +38,17 @@ except Exception:  # pragma: no cover - lets mock mode work without torch.
 
 def append_answer_prompt(text: str) -> str:
     return f"{text.rstrip()}{ANSWER_PROMPT}"
+
+
+def parse_input_text(input_text: str) -> tuple[str, str, str]:
+    match = INPUT_RE.match(input_text)
+    if not match:
+        return "", "", input_text
+    return (
+        match.group("instruction").strip(),
+        match.group("query").strip(),
+        match.group("doc").strip(),
+    )
 
 
 def normalize_model_name_or_path(model_name_or_path: str) -> str:
@@ -296,6 +312,82 @@ class CausalLMScorer:
         )
 
 
+class SwiftGenerativeRerankerScorer:
+    """ms-swift TransformersEngine scorer for Qwen3 generative rerankers."""
+
+    backend = "swift"
+
+    def __init__(
+        self,
+        model_name_or_path: str,
+        adapters: list[str] | None = None,
+        attn_impl: str = "flash_attention_2",
+    ):
+        model_name_or_path = normalize_model_name_or_path(model_name_or_path)
+        try:
+            from swift.infer_engine import InferRequest, TransformersEngine
+        except ImportError as exc:
+            raise RuntimeError(
+                "ms-swift is required for --backend swift. Install it with: "
+                "pip install ms-swift -U"
+            ) from exc
+
+        self.InferRequest = InferRequest
+        engine_kwargs: dict[str, Any] = {
+            "task_type": "generative_reranker",
+            "attn_impl": attn_impl,
+        }
+        if adapters:
+            engine_kwargs["adapters"] = adapters
+        self.engine = TransformersEngine(model_name_or_path, **engine_kwargs)
+
+    @staticmethod
+    def _score_from_content(content: Any) -> float:
+        text = str(content).strip()
+        lowered = text.lower()
+        if lowered in {"yes", "true", "relevant"}:
+            return 1.0
+        if lowered in {"no", "false", "irrelevant"}:
+            return 0.0
+        match = re.search(r"[-+]?(?:\d*\.\d+|\d+)", text)
+        if not match:
+            logger.warning("Could not parse swift reranker score from response: %r", text)
+            return 0.0
+        value = float(match.group(0))
+        if value > 1.0:
+            value = value / 10.0
+        return float(max(0.0, min(1.0, value)))
+
+    def _request_from_input_text(self, input_text: str) -> Any:
+        instruction, query, doc = parse_input_text(input_text)
+        user_content = query if not instruction else f"{instruction}\n{query}"
+        return self.InferRequest(
+            messages=[
+                {"role": "user", "content": user_content},
+                {"role": "assistant", "content": doc},
+            ]
+        )
+
+    def predict(self, input_texts: list[str], batch_size: int = 32) -> list[float]:
+        scores: list[float] = []
+        starts = range(0, len(input_texts), batch_size)
+        total_batches = math.ceil(len(input_texts) / batch_size) if input_texts else 0
+        for start in tqdm(
+            starts,
+            total=total_batches,
+            desc="Swift scoring",
+            unit="batch",
+            dynamic_ncols=True,
+            ascii=True,
+        ):
+            batch = input_texts[start : start + batch_size]
+            infer_requests = [self._request_from_input_text(text) for text in batch]
+            responses = self.engine.infer(infer_requests)
+            for response in responses:
+                scores.append(self._score_from_content(response.choices[0].message.content))
+        return scores
+
+
 def predict_sequence_classification_model(
     model: Any,
     tokenizer: Any,
@@ -312,7 +404,7 @@ def predict_sequence_classification_model(
     scores: list[float] = []
     starts = range(0, len(input_texts), batch_size)
     total_batches = math.ceil(len(input_texts) / batch_size) if input_texts else 0
-    with torch.no_grad():
+    with torch.inference_mode():
         for start in tqdm(
             starts,
             total=total_batches,
@@ -352,7 +444,7 @@ def predict_causal_model(
     prompts = [append_answer_prompt(text) for text in input_texts]
     starts = range(0, len(prompts), batch_size)
     total_batches = math.ceil(len(prompts) / batch_size) if prompts else 0
-    with torch.no_grad():
+    with torch.inference_mode():
         for start in tqdm(
             starts,
             total=total_batches,
@@ -486,6 +578,8 @@ def load_scorer(
     bf16: bool = False,
     fp16: bool = False,
     mock: bool = False,
+    adapters: list[str] | None = None,
+    swift_attn_impl: str = "flash_attention_2",
 ) -> Any:
     if mock:
         return MockRerankerScorer(query=batch_query)
@@ -495,6 +589,12 @@ def load_scorer(
     backend = detect_backend(model_path, backend)
     logger.info("Loading reranker scorer backend=%s model=%s", backend, model_path)
 
+    if backend == "swift":
+        return SwiftGenerativeRerankerScorer(
+            model_path,
+            adapters=adapters,
+            attn_impl=swift_attn_impl,
+        )
     if backend == "cross_encoder":
         try:
             return CrossEncoderScorer(model_path, max_length=max_length, torch_dtype=dtype)

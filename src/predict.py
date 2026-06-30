@@ -22,9 +22,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--docs_file", required=True, help="JSONL/JSON docs. Each row may contain doc or title/abstract.")
     parser.add_argument("--output_file", default="predictions_ranked.json")
     parser.add_argument("--top_k", type=int, default=10)
-    parser.add_argument("--backend", default="auto", choices=["auto", "cross_encoder", "causal_lm"])
+    parser.add_argument("--backend", default="auto", choices=["auto", "cross_encoder", "causal_lm", "swift"])
     parser.add_argument("--max_length", type=int, default=4096)
     parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--adapters", nargs="*", default=None, help="Optional ms-swift adapter paths for --backend swift.")
+    parser.add_argument("--swift_attn_impl", default="flash_attention_2")
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--mock", action="store_true", help="Use lexical mock scorer for smoke tests.")
@@ -65,6 +67,8 @@ def main() -> None:
         bf16=args.bf16,
         fp16=args.fp16,
         mock=args.mock,
+        adapters=args.adapters,
+        swift_attn_impl=args.swift_attn_impl,
     )
     scores = scorer.predict(input_texts, batch_size=args.batch_size)
 

@@ -67,6 +67,12 @@ pip install -r requirements.txt
 
 For QLoRA, use a Linux CUDA environment with `bitsandbytes`.
 
+For ms-swift evaluation:
+
+```bash
+pip install -r requirements-swift.txt
+```
+
 If baseline logs say `No module named 'sentence_transformers'`, the environment
 has not installed this repo's full requirements yet. Run the command above
 inside the same virtual environment that runs training/evaluation.
@@ -166,6 +172,62 @@ TEST_FILE=data/split_seed42/test.jsonl \
 MODEL_NAME_OR_PATH=/path/to/Qwen3-Reranker-0.6B \
 OUTPUT_DIR=outputs/baseline_qwen3_reranker_06b \
 bash scripts/eval_baseline.sh
+```
+
+The script defaults to `PRECISION=fp16` and `BATCH_SIZE=16`. For a quick
+throughput check, inspect these fields in `overall_metrics.json`:
+
+```text
+score_time_seconds
+seconds_per_example
+examples_per_second
+```
+
+Common reasons for slow evaluation:
+
+- The environment is missing `sentence-transformers`, so the code falls back to
+  the causal LM backend.
+- The run is on CPU, or the model was loaded in fp32 instead of fp16.
+- `batch_size=4` and `max_length=4096` are conservative and can underuse the GPU.
+- Very long documents make reranking expensive because each query-document pair
+  is a full forward pass.
+- Hugging Face download/proxy stalls can look like model load latency.
+
+For local 0.6B model evaluation on your Linux machine:
+
+```bash
+TEST_FILE=data/split_seed42/test.jsonl \
+MODEL_NAME_OR_PATH=/home/c50061497/MemOS/reranker/memranker/models/Qwen3-Reranker-0.6B \
+BATCH_SIZE=16 \
+MAX_LENGTH=2048 \
+OUTPUT_DIR=outputs/baseline_qwen3_reranker_06b \
+bash scripts/eval_baseline.sh
+```
+
+## ms-swift Baseline Evaluation
+
+The ms-swift backend uses its Qwen3 generative reranker path. Install the extra
+dependency first:
+
+```bash
+pip install -r requirements-swift.txt
+```
+
+Then run:
+
+```bash
+TEST_FILE=data/split_seed42/test.jsonl \
+MODEL_NAME_OR_PATH=/home/c50061497/MemOS/reranker/memranker/models/Qwen3-Reranker-0.6B \
+BATCH_SIZE=32 \
+OUTPUT_DIR=outputs/baseline_qwen3_reranker_06b_swift \
+bash scripts/eval_baseline_swift.sh
+```
+
+If `flash_attention_2` is not available in the environment, override the
+attention implementation:
+
+```bash
+SWIFT_ATTN_IMPL=eager bash scripts/eval_baseline_swift.sh
 ```
 
 Outputs:
