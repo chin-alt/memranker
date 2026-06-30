@@ -23,7 +23,6 @@ from modeling import (
     normalize_model_name_or_path,
     prepare_qwen3_reranker_inputs,
     predict_causal_model,
-    predict_sequence_classification_model,
     save_reranker_config,
     torch,
 )
@@ -50,7 +49,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split_file", default=None, help="Optional JSON split file with train/dev/test group keys.")
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--model_name_or_path", default=DEFAULT_MODEL_NAME)
-    parser.add_argument("--backend", default="causal_lm", choices=["auto", "cross_encoder", "causal_lm"])
     parser.add_argument("--max_length", type=int, default=4096)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=2e-5)
@@ -71,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--relevance_threshold", type=float, default=0.7)
     parser.add_argument("--default_instruction", default="")
     add_bool_arg(parser, "gradient_checkpointing", default=True, help_text="Enable gradient checkpointing")
-    parser.add_argument("--load_in_4bit", action="store_true", help="Enable QLoRA-style 4-bit loading for causal backend.")
+    parser.add_argument("--load_in_4bit", action="store_true", help="Enable QLoRA-style 4-bit loading.")
     parser.add_argument(
         "--attn_implementation",
         default=None,
@@ -192,33 +190,6 @@ def prepare_output_dir(args: argparse.Namespace, split_info: dict[str, Any], acc
     accelerator.wait_for_everyone()
 
 
-def maybe_apply_lora_to_sequence_model(model: Any, args: argparse.Namespace) -> Any:
-    if not args.use_lora:
-        return model
-    from peft import LoraConfig, TaskType, get_peft_model
-
-    config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        bias="none",
-        task_type=TaskType.SEQ_CLS,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
-    )
-    model = get_peft_model(model, config)
-    if hasattr(model, "print_trainable_parameters"):
-        model.print_trainable_parameters()
-    return model
-
-
 def make_optimizer(model: Any, args: argparse.Namespace) -> Any:
     if torch is None:
         raise RuntimeError("torch is required for training")
@@ -242,39 +213,6 @@ def make_scheduler(optimizer: Any, args: argparse.Namespace, num_batches: int) -
     )
 
 
-def save_best_cross_encoder(
-    model: Any,
-    tokenizer: Any,
-    args: argparse.Namespace,
-    accelerator: Any,
-    metrics: dict[str, float],
-) -> None:
-    best_dir = Path(args.output_dir) / "best"
-    if best_dir.exists():
-        shutil.rmtree(best_dir)
-    best_dir.mkdir(parents=True, exist_ok=True)
-    unwrapped = accelerator.unwrap_model(model)
-    unwrapped.save_pretrained(best_dir, save_function=accelerator.save)
-    tokenizer.save_pretrained(best_dir)
-    save_reranker_config(
-        best_dir,
-        {
-            "backend": "cross_encoder",
-            "base_model_name_or_path": args.model_name_or_path,
-            "max_length": args.max_length,
-            "score_activation": "sigmoid",
-            "loss": "BCEWithLogitsLoss",
-            "label_normalization": "labels / 10 clipped to [0, 1]",
-            "distributed": {
-                "num_processes": accelerator.num_processes,
-                "mixed_precision": accelerator.mixed_precision,
-            },
-        },
-    )
-    save_json(Path(args.output_dir) / "best_metrics.json", metrics)
-    logger.info("Saved new best checkpoint to %s", best_dir)
-
-
 def save_best_causal(
     wrapper: Any,
     tokenizer: Any,
@@ -292,7 +230,6 @@ def save_best_causal(
     save_reranker_config(
         best_dir,
         {
-            "backend": "causal_lm",
             "base_model_name_or_path": args.model_name_or_path,
             "max_length": args.max_length,
             "prompt_format": "Qwen3-Reranker chat prefix + <Instruct>/<Query>/<Document> + assistant think suffix",
@@ -313,113 +250,6 @@ def save_best_causal(
     logger.info("Saved new best checkpoint to %s", best_dir)
 
 
-def train_cross_encoder(
-    args: argparse.Namespace,
-    splits: dict[str, list[RerankerExample]],
-    accelerator: Any,
-) -> dict[str, float]:
-    if torch is None:
-        raise RuntimeError("torch is required for CrossEncoder training")
-    from sentence_transformers import CrossEncoder
-    from torch.utils.data import DataLoader
-
-    if accelerator.is_main_process:
-        logger.info("Trying CrossEncoder backend with model %s", args.model_name_or_path)
-    ce = CrossEncoder(args.model_name_or_path, num_labels=1, max_length=args.max_length)
-    model = maybe_apply_lora_to_sequence_model(ce.model, args)
-    tokenizer = ce.tokenizer
-    if args.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
-        model.gradient_checkpointing_enable()
-        if hasattr(model.config, "use_cache"):
-            model.config.use_cache = False
-
-    train_examples = splits["train"]
-    eval_examples = splits["dev"] or splits["test"] or splits["train"]
-    if accelerator.is_main_process and not splits["dev"]:
-        logger.warning("Dev split is empty; evaluating on %s split.", "test" if splits["test"] else "train")
-
-    def collate(batch: list[RerankerExample]) -> tuple[dict[str, Any], Any]:
-        encoded = tokenizer(
-            [ex.input_text for ex in batch],
-            truncation=True,
-            padding=True,
-            max_length=args.max_length,
-            return_tensors="pt",
-        )
-        labels = torch.tensor([ex.label for ex in batch], dtype=torch.float32)
-        return encoded, labels
-
-    loader = DataLoader(
-        train_examples,
-        batch_size=args.per_device_train_batch_size,
-        shuffle=True,
-        collate_fn=collate,
-    )
-    if len(loader) == 0:
-        raise ValueError("Empty training dataloader")
-
-    optimizer = make_optimizer(model, args)
-    model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
-    scheduler = make_scheduler(optimizer, args, len(loader))
-    loss_fn = torch.nn.BCEWithLogitsLoss()
-    best_metrics: dict[str, float] | None = None
-    history_path = Path(args.output_dir) / "metrics_history.jsonl"
-
-    for epoch in range(1, args.epochs + 1):
-        model.train()
-        optimizer.zero_grad(set_to_none=True)
-        running_loss = 0.0
-        progress = tqdm(
-            enumerate(loader, start=1),
-            total=len(loader),
-            desc=f"Epoch {epoch}/{args.epochs}",
-            unit="batch",
-            dynamic_ncols=True,
-            ascii=True,
-            disable=args.disable_tqdm or not accelerator.is_main_process,
-        )
-        for step, (encoded, labels) in progress:
-            with accelerator.accumulate(model):
-                outputs = model(**encoded)
-                logits = outputs.logits.squeeze(-1)
-                loss = loss_fn(logits.float(), labels.float())
-                accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
-
-            running_loss += float(accelerator.gather(loss.detach()).mean().cpu())
-            if accelerator.is_main_process and not args.disable_tqdm:
-                progress.set_postfix(loss=f"{running_loss / step:.4f}")
-            if accelerator.is_main_process and args.logging_steps > 0 and step % args.logging_steps == 0:
-                logger.info("epoch=%d step=%d train_loss=%.6f", epoch, step, running_loss / step)
-
-        accelerator.wait_for_everyone()
-        if accelerator.is_main_process:
-            eval_model = accelerator.unwrap_model(model)
-            predict_fn = lambda texts: predict_sequence_classification_model(
-                eval_model,
-                tokenizer,
-                texts,
-                max_length=args.max_length,
-                batch_size=args.eval_batch_size,
-                device=str(accelerator.device),
-            )
-            metrics = evaluate_examples(eval_examples, predict_fn, args.relevance_threshold)
-            metrics["epoch"] = float(epoch)
-            logger.info("epoch=%d dev_metrics=%s", epoch, json.dumps(metrics, ensure_ascii=False))
-            with history_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({"backend": "cross_encoder", **metrics}, ensure_ascii=False) + "\n")
-
-            if is_better_metric(metrics, best_metrics):
-                best_metrics = metrics
-                save_best_cross_encoder(model, tokenizer, args, accelerator, metrics)
-        accelerator.wait_for_everyone()
-
-    return best_metrics or {}
-
-
 def _kbit_device_map_for_process(args: argparse.Namespace, accelerator: Any) -> Any | None:
     if not args.load_in_4bit or accelerator.num_processes <= 1:
         return None
@@ -437,7 +267,7 @@ def train_causal_lm(
     from torch.utils.data import DataLoader
 
     if accelerator.is_main_process:
-        logger.info("Using causal LM yes/no-logit backend with model %s", args.model_name_or_path)
+        logger.info("Using Qwen3 causal yes/no-logit training with model %s", args.model_name_or_path)
     try:
         wrapper, tokenizer = load_causal_training_model(
             args.model_name_or_path,
@@ -528,7 +358,7 @@ def train_causal_lm(
             metrics["epoch"] = float(epoch)
             logger.info("epoch=%d dev_metrics=%s", epoch, json.dumps(metrics, ensure_ascii=False))
             with history_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({"backend": "causal_lm", **metrics}, ensure_ascii=False) + "\n")
+                f.write(json.dumps(metrics, ensure_ascii=False) + "\n")
 
             if is_better_metric(metrics, best_metrics):
                 best_metrics = metrics
@@ -536,29 +366,6 @@ def train_causal_lm(
         accelerator.wait_for_everyone()
 
     return best_metrics or {}
-
-
-def train(
-    args: argparse.Namespace,
-    splits: dict[str, list[RerankerExample]],
-    accelerator: Any,
-) -> dict[str, float]:
-    backend_order = ["causal_lm", "cross_encoder"] if args.backend == "auto" else [args.backend]
-    errors = []
-    for backend in backend_order:
-        try:
-            if backend == "cross_encoder":
-                return train_cross_encoder(args, splits, accelerator)
-            if backend == "causal_lm":
-                return train_causal_lm(args, splits, accelerator)
-        except Exception as exc:
-            if args.backend != "auto":
-                raise
-            if accelerator.is_main_process:
-                logger.exception("Backend %s failed; trying next backend if available.", backend)
-            errors.append(f"{backend}: {exc}")
-            accelerator.wait_for_everyone()
-    raise RuntimeError("All training backends failed: " + " | ".join(errors))
 
 
 def main() -> None:
@@ -590,7 +397,7 @@ def main() -> None:
             accelerator.device,
         )
     prepare_output_dir(args, split_info, accelerator)
-    best_metrics = train(args, splits, accelerator)
+    best_metrics = train_causal_lm(args, splits, accelerator)
     if accelerator.is_main_process:
         logger.info("Best metrics: %s", json.dumps(best_metrics, ensure_ascii=False))
 

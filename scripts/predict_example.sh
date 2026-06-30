@@ -6,11 +6,9 @@ DOCS_FILE="${DOCS_FILE:-data/docs.jsonl}"
 OUTPUT_FILE="${OUTPUT_FILE:-predictions_ranked.json}"
 QUERY="${QUERY:-Which pocket camera ships faster?}"
 INSTRUCTION="${INSTRUCTION:-Judge whether the document answers the query.}"
-BACKEND="${BACKEND:-causal_lm}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 
 python src/predict.py \
-  --backend "${BACKEND}" \
   --model_path "${MODEL_PATH}" \
   --instruction "${INSTRUCTION}" \
   --query "${QUERY}" \

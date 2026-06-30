@@ -7,8 +7,8 @@ It does not train a large model from scratch. It starts from a Qwen3 reranker
 checkpoint, formats each sample as instruction + query + document, and fits
 soft teacher labels from your query-doc-score data.
 
-The paper-aligned causal backend does not generate text. It follows the
-Qwen3-Reranker scoring path:
+The implementation uses only the Qwen3-Reranker causal LM yes/no-logit scoring
+path. It does not generate text:
 
 ```text
 score = softmax([logit_no, logit_yes])[yes]
@@ -80,8 +80,8 @@ pip install -r requirements.txt
 
 For QLoRA, use a Linux CUDA environment with `bitsandbytes`.
 
-The default baseline uses the causal LM yes/no-logit backend. The
-`sentence-transformers` package is kept for the optional CrossEncoder backend.
+Training, evaluation, and prediction all use the same Qwen3 causal LM
+yes/no-logit path.
 
 If logs say `Can't load the configuration of 'Qwen/Qwen3-Reranker-0.6B'` after
 an `httpx.ProxyError` or `504 Gateway Time-out`, the model id is probably fine;
@@ -133,7 +133,6 @@ Then copy that directory to the cluster and pass it as a local path:
 
 ```bash
 python src/evaluate.py \
-  --backend causal_lm \
   --model_path /path/to/Qwen3-Reranker-0.6B \
   --test_file data/split_seed42/test.jsonl \
   --output_dir outputs/baseline_local_model \
@@ -195,10 +194,10 @@ OUTPUT_DIR=outputs/baseline_qwen3_reranker_06b \
 bash scripts/eval_baseline.sh
 ```
 
-The script defaults to `BACKEND=causal_lm`, `PRECISION=fp16`,
-`BATCH_SIZE=16`, and `ATTN_IMPLEMENTATION=flash_attention_2`. If flash-attn is
-not installed, set `ATTN_IMPLEMENTATION=eager`. For a quick throughput check,
-inspect these fields in `overall_metrics.json`:
+The script defaults to `PRECISION=fp16`, `BATCH_SIZE=16`, and
+`ATTN_IMPLEMENTATION=flash_attention_2`. If flash-attn is not installed, set
+`ATTN_IMPLEMENTATION=eager`. For a quick throughput check, inspect these fields
+in `overall_metrics.json`:
 
 ```text
 score_time_seconds
@@ -219,28 +218,11 @@ For local 0.6B model evaluation on your Linux machine:
 ```bash
 TEST_FILE=data/split_seed42/test.jsonl \
 MODEL_NAME_OR_PATH=/home/c50061497/MemOS/reranker/memranker/models/Qwen3-Reranker-0.6B \
-BACKEND=causal_lm \
 BATCH_SIZE=16 \
 MAX_LENGTH=2048 \
 ATTN_IMPLEMENTATION=flash_attention_2 \
 OUTPUT_DIR=outputs/baseline_qwen3_reranker_06b \
 bash scripts/eval_baseline.sh
-```
-
-## Why the old ms-swift script is disabled
-
-The previous ms-swift baseline used a generative reranker interface and parsed
-returned text into a numeric score. That is not equivalent to the MemReranker
-Stage 2 objective, because BCE distillation needs the continuous probability
-derived from final-token `yes/no` logits. Text parsing can turn many rows into
-hard `0/1` or `0.0`, which explains large drops in MSE, NDCG, MAP, and MRR.
-
-The repository keeps `scripts/eval_baseline_swift.sh` only as a guardrail; it
-exits with an explanation. A future ms-swift integration should expose logits
-and compute exactly:
-
-```text
-score = softmax([logit_no, logit_yes])[yes]
 ```
 
 Evaluation outputs:
@@ -255,7 +237,6 @@ predictions.jsonl
 
 ```bash
 python src/train_pointwise.py \
-  --backend causal_lm \
   --train_file data/split_seed42/train.jsonl \
   --dev_file data/split_seed42/dev.jsonl \
   --test_file data/split_seed42/test.jsonl \
@@ -297,7 +278,6 @@ accelerate launch --num_processes 8 --mixed_precision fp16
 
 Important defaults for RTX 3090:
 
-- `--backend causal_lm`
 - `--model_name_or_path Qwen/Qwen3-Reranker-4B`
 - `--fp16`
 - `--use_lora`
@@ -327,7 +307,6 @@ Use the same fixed test split:
 
 ```bash
 python src/evaluate.py \
-  --backend causal_lm \
   --model_path outputs/qwen3_reranker_4b_8x3090_lora/best \
   --test_file data/split_seed42/test.jsonl \
   --output_dir outputs/finetuned_eval \
@@ -375,7 +354,6 @@ Run:
 
 ```bash
 python src/predict.py \
-  --backend causal_lm \
   --model_path outputs/qwen3_reranker_4b_8x3090_lora/best \
   --instruction "Score whether the document answers the query." \
   --query "Which pocket camera ships faster?" \

@@ -17,7 +17,6 @@ accelerate launch \
   --num_processes "${NUM_PROCESSES}" \
   --mixed_precision fp16 \
   src/train_pointwise.py \
-  --backend causal_lm \
   --train_file "${TRAIN_FILE}" \
   --dev_file "${DEV_FILE}" \
   --test_file "${TEST_FILE}" \

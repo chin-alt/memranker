@@ -25,12 +25,6 @@ RERANKER_PREFIX = (
     "<|im_start|>user\n"
 )
 RERANKER_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-SCORE_TRANSFORM = "softmax([logit_no, logit_yes])[yes]"
-LOSS_DESCRIPTION = "BCEWithLogitsLoss(logit_yes - logit_no, soft_label)"
-INPUT_RE = re.compile(
-    r"<Instruct>:\s*(?P<instruction>.*?)\s*<Query>:\s*(?P<query>.*?)\s*<Document>:\s*(?P<doc>.*)",
-    re.DOTALL,
-)
 MODEL_NAME_ALIASES = {
     "qwen/qwen3-reranker-0.6": DEFAULT_MODEL_NAME,
     "qwen/qwen3-reranker-0.6b": DEFAULT_MODEL_NAME,
@@ -44,27 +38,6 @@ try:
     import torch
 except Exception:  # pragma: no cover - lets mock mode work without torch.
     torch = None  # type: ignore[assignment]
-
-
-def build_qwen3_reranker_prompt(text: str) -> str:
-    """Build the official Qwen3-Reranker yes/no classification prompt."""
-    return f"{RERANKER_PREFIX}{text.strip()}{RERANKER_SUFFIX}"
-
-
-def append_answer_prompt(text: str) -> str:
-    """Backward-compatible alias; new code should use Qwen3 prompt helpers."""
-    return build_qwen3_reranker_prompt(text)
-
-
-def parse_input_text(input_text: str) -> tuple[str, str, str]:
-    match = INPUT_RE.match(input_text)
-    if not match:
-        return "", "", input_text
-    return (
-        match.group("instruction").strip(),
-        match.group("query").strip(),
-        match.group("doc").strip(),
-    )
 
 
 def normalize_model_name_or_path(model_name_or_path: str) -> str:
@@ -100,8 +73,7 @@ def model_load_help(model_name_or_path: str, exc: BaseException) -> str:
         "1. Use the exact Hugging Face id, for example Qwen/Qwen3-Reranker-0.6B "
         "or Qwen/Qwen3-Reranker-4B.\n"
         "2. Install all dependencies: pip install -r requirements.txt\n"
-        "3. Qwen3 requires transformers>=4.51.0. The optional CrossEncoder backend "
-        "also requires sentence-transformers.\n"
+        "3. Qwen3 requires transformers>=4.51.0.\n"
         "4. If the machine cannot reach Hugging Face, download the model on a machine "
         "with network access and pass the local directory via --model_path or "
         "--model_name_or_path.\n"
@@ -183,8 +155,6 @@ def prepare_qwen3_reranker_inputs(
 class MockRerankerScorer:
     """Deterministic lexical scorer for smoke tests; it is not a model."""
 
-    backend = "mock"
-
     def __init__(self, query: str | None = None):
         self.query = query or ""
 
@@ -217,67 +187,6 @@ class MockRerankerScorer:
             length_bonus = min(0.15, math.log1p(len(d_tokens)) / 100.0)
             scores.append(float(min(1.0, overlap + length_bonus)))
         return scores
-
-
-class CrossEncoderScorer:
-    backend = "cross_encoder"
-
-    def __init__(
-        self,
-        model_name_or_path: str,
-        max_length: int = 4096,
-        device: str | None = None,
-        torch_dtype: Any | None = None,
-    ):
-        if torch is None:
-            raise RuntimeError("torch is required for CrossEncoderScorer")
-        model_name_or_path = normalize_model_name_or_path(model_name_or_path)
-        path = Path(model_name_or_path)
-        adapter_config = path / "adapter_config.json"
-        if adapter_config.exists():
-            from peft import PeftModel
-            from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
-            adapter_data = json.loads(adapter_config.read_text(encoding="utf-8"))
-            base_path = adapter_data.get("base_model_name_or_path") or DEFAULT_MODEL_NAME
-            tokenizer_path = model_name_or_path if (path / "tokenizer_config.json").exists() else base_path
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_path,
-                trust_remote_code=True,
-                padding_side="right",
-            )
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-            base_model = AutoModelForSequenceClassification.from_pretrained(
-                base_path,
-                num_labels=1,
-                trust_remote_code=True,
-                torch_dtype=torch_dtype,
-            )
-            self.model = PeftModel.from_pretrained(base_model, model_name_or_path)
-        else:
-            from sentence_transformers import CrossEncoder
-
-            kwargs: dict[str, Any] = {"max_length": max_length}
-            if device:
-                kwargs["device"] = device
-            if torch_dtype is not None:
-                kwargs["automodel_args"] = {"torch_dtype": torch_dtype}
-            self.cross_encoder = CrossEncoder(model_name_or_path, num_labels=1, **kwargs)
-            self.model = self.cross_encoder.model
-            self.tokenizer = self.cross_encoder.tokenizer
-        self.max_length = max_length
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-
-    def predict(self, input_texts: list[str], batch_size: int = 16) -> list[float]:
-        return predict_sequence_classification_model(
-            self.model,
-            self.tokenizer,
-            input_texts,
-            max_length=self.max_length,
-            batch_size=batch_size,
-            device=self.device,
-        )
 
 
 if torch is not None:
@@ -326,8 +235,6 @@ else:
 
 
 class CausalLMScorer:
-    backend = "causal_lm"
-
     def __init__(
         self,
         model_name_or_path: str,
@@ -390,46 +297,6 @@ class CausalLMScorer:
             batch_size=batch_size,
             device=self.device,
         )
-
-
-def predict_sequence_classification_model(
-    model: Any,
-    tokenizer: Any,
-    input_texts: list[str],
-    max_length: int = 4096,
-    batch_size: int = 16,
-    device: str | None = None,
-) -> list[float]:
-    if torch is None:
-        raise RuntimeError("torch is required for sequence-classification prediction")
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    model.eval()
-    scores: list[float] = []
-    starts = range(0, len(input_texts), batch_size)
-    total_batches = math.ceil(len(input_texts) / batch_size) if input_texts else 0
-    with torch.inference_mode():
-        for start in tqdm(
-            starts,
-            total=total_batches,
-            desc="Scoring",
-            unit="batch",
-            dynamic_ncols=True,
-            ascii=True,
-        ):
-            batch = input_texts[start : start + batch_size]
-            encoded = tokenizer(
-                batch,
-                truncation=True,
-                padding=True,
-                max_length=max_length,
-                return_tensors="pt",
-            )
-            encoded = {key: value.to(device) for key, value in encoded.items()}
-            outputs = model(**encoded)
-            logits = outputs.logits.squeeze(-1).detach().float().cpu().numpy()
-            scores.extend(sigmoid_array(np.asarray(logits)).tolist())
-    return [float(score) for score in scores]
 
 
 def predict_causal_model(
@@ -558,23 +425,8 @@ def load_causal_training_model(
     return QwenCausalReranker(model, tokenizer), tokenizer
 
 
-def detect_backend(model_path: str, requested_backend: str = "auto") -> str:
-    if requested_backend != "auto":
-        return requested_backend
-    model_path = normalize_model_name_or_path(model_path)
-    path = Path(model_path)
-    config_path = path / "reranker_config.json"
-    if config_path.exists():
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        backend = data.get("backend")
-        if backend:
-            return str(backend)
-    return "causal_lm"
-
-
 def load_scorer(
     model_path: str = DEFAULT_MODEL_NAME,
-    backend: str = "auto",
     max_length: int = 4096,
     batch_query: str | None = None,
     bf16: bool = False,
@@ -587,36 +439,16 @@ def load_scorer(
 
     model_path = normalize_model_name_or_path(model_path)
     dtype = torch_dtype_from_flags(bf16=bf16, fp16=fp16)
-    backend = detect_backend(model_path, backend)
-    logger.info("Loading reranker scorer backend=%s model=%s", backend, model_path)
-
-    if backend == "cross_encoder":
-        try:
-            return CrossEncoderScorer(model_path, max_length=max_length, torch_dtype=dtype)
-        except Exception as exc:
-            if detect_backend(model_path, "auto") == "cross_encoder":
-                logger.warning("CrossEncoder load failed, falling back to causal LM: %s", exc)
-                try:
-                    return CausalLMScorer(
-                        model_path,
-                        max_length=max_length,
-                        torch_dtype=dtype,
-                        attn_implementation=attn_implementation,
-                    )
-                except Exception as causal_exc:
-                    raise RuntimeError(model_load_help(model_path, causal_exc)) from causal_exc
-            raise
-    if backend == "causal_lm":
-        try:
-            return CausalLMScorer(
-                model_path,
-                max_length=max_length,
-                torch_dtype=dtype,
-                attn_implementation=attn_implementation,
-            )
-        except Exception as exc:
-            raise RuntimeError(model_load_help(model_path, exc)) from exc
-    raise ValueError(f"Unknown backend: {backend}")
+    logger.info("Loading Qwen3 causal yes/no-logit reranker model=%s", model_path)
+    try:
+        return CausalLMScorer(
+            model_path,
+            max_length=max_length,
+            torch_dtype=dtype,
+            attn_implementation=attn_implementation,
+        )
+    except Exception as exc:
+        raise RuntimeError(model_load_help(model_path, exc)) from exc
 
 
 def save_reranker_config(output_dir: str | Path, config: dict[str, Any]) -> None:

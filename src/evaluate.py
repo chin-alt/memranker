@@ -20,7 +20,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test_file", required=True, help="JSON/JSONL file with query-doc-label rows.")
     parser.add_argument("--model_path", default=DEFAULT_MODEL_NAME, help="Base model or finetuned checkpoint.")
     parser.add_argument("--output_dir", default="outputs/eval", help="Directory for metric and prediction files.")
-    parser.add_argument("--backend", default="causal_lm", choices=["auto", "cross_encoder", "causal_lm"])
     parser.add_argument("--max_length", type=int, default=4096)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--relevance_threshold", type=float, default=0.7)
@@ -45,7 +44,6 @@ def main() -> None:
     examples = load_examples(args.test_file, default_instruction=args.default_instruction)
     scorer = load_scorer(
         args.model_path,
-        backend=args.backend,
         max_length=args.max_length,
         bf16=args.bf16,
         fp16=args.fp16,
@@ -55,9 +53,8 @@ def main() -> None:
 
     input_texts = [ex.input_text for ex in examples]
     logger.info(
-        "Scoring %d examples with backend=%s batch_size=%d max_length=%d",
+        "Scoring %d examples with Qwen3 causal yes/no logits batch_size=%d max_length=%d",
         len(input_texts),
-        args.backend,
         args.batch_size,
         args.max_length,
     )

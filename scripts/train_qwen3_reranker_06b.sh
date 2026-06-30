@@ -5,11 +5,9 @@ TRAIN_FILE="${TRAIN_FILE:-data/train.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/qwen3_reranker_06b_lora}"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen3-Reranker-0.6B}"
 MAX_LENGTH="${MAX_LENGTH:-4096}"
-BACKEND="${BACKEND:-causal_lm}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 
 python src/train_pointwise.py \
-  --backend "${BACKEND}" \
   --train_file "${TRAIN_FILE}" \
   --output_dir "${OUTPUT_DIR}" \
   --model_name_or_path "${MODEL_NAME_OR_PATH}" \

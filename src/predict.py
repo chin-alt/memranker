@@ -22,7 +22,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--docs_file", required=True, help="JSONL/JSON docs. Each row may contain doc or title/abstract.")
     parser.add_argument("--output_file", default="predictions_ranked.json")
     parser.add_argument("--top_k", type=int, default=10)
-    parser.add_argument("--backend", default="causal_lm", choices=["auto", "cross_encoder", "causal_lm"])
     parser.add_argument("--max_length", type=int, default=4096)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument(
@@ -64,7 +63,6 @@ def main() -> None:
     input_texts = [format_input_text(args.instruction, args.query, row["doc"]) for row in docs]
     scorer = load_scorer(
         args.model_path,
-        backend=args.backend,
         max_length=args.max_length,
         batch_query=args.query,
         bf16=args.bf16,

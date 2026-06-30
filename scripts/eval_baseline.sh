@@ -7,7 +7,6 @@ MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen3-Reranker-0.6B}"
 MAX_LENGTH="${MAX_LENGTH:-4096}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 PRECISION="${PRECISION:-fp16}"
-BACKEND="${BACKEND:-causal_lm}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 
 PRECISION_ARGS=()
@@ -23,7 +22,6 @@ if [[ -n "${ATTN_IMPLEMENTATION}" ]]; then
 fi
 
 python src/evaluate.py \
-  --backend "${BACKEND}" \
   --test_file "${TEST_FILE}" \
   --model_path "${MODEL_NAME_OR_PATH}" \
   --output_dir "${OUTPUT_DIR}" \
