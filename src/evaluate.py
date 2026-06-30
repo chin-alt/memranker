@@ -20,17 +20,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test_file", required=True, help="JSON/JSONL file with query-doc-label rows.")
     parser.add_argument("--model_path", default=DEFAULT_MODEL_NAME, help="Base model or finetuned checkpoint.")
     parser.add_argument("--output_dir", default="outputs/eval", help="Directory for metric and prediction files.")
-    parser.add_argument("--backend", default="auto", choices=["auto", "cross_encoder", "causal_lm", "swift"])
+    parser.add_argument("--backend", default="causal_lm", choices=["auto", "cross_encoder", "causal_lm"])
     parser.add_argument("--max_length", type=int, default=4096)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--relevance_threshold", type=float, default=0.7)
     parser.add_argument("--default_instruction", default="")
-    parser.add_argument("--adapters", nargs="*", default=None, help="Optional ms-swift adapter paths for --backend swift.")
-    parser.add_argument("--swift_attn_impl", default="flash_attention_2")
     parser.add_argument(
-        "--swift_include_instruction",
-        action="store_true",
-        help="For --backend swift, prepend instruction to the query. Default keeps official query/doc format.",
+        "--attn_implementation",
+        default=None,
+        help="Optional transformers attention backend, for example flash_attention_2 or eager.",
     )
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fp16", action="store_true")
@@ -52,9 +50,7 @@ def main() -> None:
         bf16=args.bf16,
         fp16=args.fp16,
         mock=args.mock,
-        adapters=args.adapters,
-        swift_attn_impl=args.swift_attn_impl,
-        swift_include_instruction=args.swift_include_instruction,
+        attn_implementation=args.attn_implementation,
     )
 
     input_texts = [ex.input_text for ex in examples]
@@ -78,7 +74,6 @@ def main() -> None:
     )
 
     rows = []
-    raw_outputs = getattr(scorer, "raw_outputs", None)
     for ex, score in zip(examples, scores, strict=False):
         row = {
             "group_key": ex.group_key,
@@ -90,8 +85,6 @@ def main() -> None:
             "score": float(score),
             "reason": ex.reason,
         }
-        if raw_outputs is not None and len(raw_outputs) == len(scores):
-            row["raw_score_output"] = raw_outputs[len(rows)]
         rows.append(row)
     rows = add_group_ranks(rows, query_key="group_key")
     overall, per_query = compute_all_metrics(

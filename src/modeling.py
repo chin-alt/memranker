@@ -16,7 +16,17 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-Reranker-0.6B"
 DEFAULT_4B_MODEL_NAME = "Qwen/Qwen3-Reranker-4B"
-ANSWER_PROMPT = "\n<Answer>:"
+RERANKER_SYSTEM_PROMPT = (
+    "Judge whether the Document meets the requirements based on the Query and "
+    'the Instruct provided. Note that the answer can only be "yes" or "no".'
+)
+RERANKER_PREFIX = (
+    f"<|im_start|>system\n{RERANKER_SYSTEM_PROMPT}<|im_end|>\n"
+    "<|im_start|>user\n"
+)
+RERANKER_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+SCORE_TRANSFORM = "softmax([logit_no, logit_yes])[yes]"
+LOSS_DESCRIPTION = "BCEWithLogitsLoss(logit_yes - logit_no, soft_label)"
 INPUT_RE = re.compile(
     r"<Instruct>:\s*(?P<instruction>.*?)\s*<Query>:\s*(?P<query>.*?)\s*<Document>:\s*(?P<doc>.*)",
     re.DOTALL,
@@ -36,8 +46,14 @@ except Exception:  # pragma: no cover - lets mock mode work without torch.
     torch = None  # type: ignore[assignment]
 
 
+def build_qwen3_reranker_prompt(text: str) -> str:
+    """Build the official Qwen3-Reranker yes/no classification prompt."""
+    return f"{RERANKER_PREFIX}{text.strip()}{RERANKER_SUFFIX}"
+
+
 def append_answer_prompt(text: str) -> str:
-    return f"{text.rstrip()}{ANSWER_PROMPT}"
+    """Backward-compatible alias; new code should use Qwen3 prompt helpers."""
+    return build_qwen3_reranker_prompt(text)
 
 
 def parse_input_text(input_text: str) -> tuple[str, str, str]:
@@ -72,12 +88,14 @@ def model_load_help(model_name_or_path: str, exc: BaseException) -> str:
         "1. Use the exact Hugging Face id, for example Qwen/Qwen3-Reranker-0.6B "
         "or Qwen/Qwen3-Reranker-4B.\n"
         "2. Install all dependencies: pip install -r requirements.txt\n"
-        "3. Qwen3 requires transformers>=4.51.0; the baseline CrossEncoder path also "
-        "requires sentence-transformers.\n"
+        "3. Qwen3 requires transformers>=4.51.0. The optional CrossEncoder backend "
+        "also requires sentence-transformers.\n"
         "4. If the machine cannot reach Hugging Face, download the model on a machine "
         "with network access and pass the local directory via --model_path or "
         "--model_name_or_path.\n"
-        "5. If your cluster uses a proxy or mirror, fix HTTPS_PROXY/HTTP_PROXY or set "
+        "5. If flash-attn is unavailable, rerun with --attn_implementation eager "
+        "or set ATTN_IMPLEMENTATION=eager in the helper scripts.\n"
+        "6. If your cluster uses a proxy or mirror, fix HTTPS_PROXY/HTTP_PROXY or set "
         "HF_ENDPOINT before running."
     )
 
@@ -90,6 +108,9 @@ def resolve_yes_no_token_ids(tokenizer: Any) -> tuple[int, int]:
     def choose(candidates: list[str]) -> int:
         fallback: list[int] | None = None
         for token in candidates:
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            if token_id not in (None, tokenizer.unk_token_id):
+                return int(token_id)
             ids = tokenizer.encode(token, add_special_tokens=False)
             if ids:
                 if fallback is None:
@@ -104,6 +125,47 @@ def resolve_yes_no_token_ids(tokenizer: Any) -> tuple[int, int]:
     no_id = choose(["no", "No", " no", " No"])
     logger.info("Resolved reranker yes/no token ids: yes=%s no=%s", yes_id, no_id)
     return yes_id, no_id
+
+
+def prepare_qwen3_reranker_inputs(
+    tokenizer: Any,
+    input_texts: list[str],
+    max_length: int,
+    device: Any | None = None,
+) -> dict[str, Any]:
+    """Tokenize inputs exactly as Qwen3-Reranker scores yes/no logits.
+
+    The query/document block is truncated before adding the chat prefix/suffix,
+    so the final token position is always the assistant answer location whose
+    logits are used for the yes/no relevance probability.
+    """
+    prefix_tokens = tokenizer.encode(RERANKER_PREFIX, add_special_tokens=False)
+    suffix_tokens = tokenizer.encode(RERANKER_SUFFIX, add_special_tokens=False)
+    pair_max_length = max(1, max_length - len(prefix_tokens) - len(suffix_tokens))
+    tokenized = tokenizer(
+        [text.strip() for text in input_texts],
+        padding=False,
+        truncation=True,
+        max_length=pair_max_length,
+        add_special_tokens=False,
+    )
+    input_ids = [
+        prefix_tokens + input_ids + suffix_tokens
+        for input_ids in tokenized["input_ids"]
+    ]
+    encoded = {
+        "input_ids": input_ids,
+        "attention_mask": [[1] * len(ids) for ids in input_ids],
+    }
+    batch = tokenizer.pad(
+        encoded,
+        padding=True,
+        return_attention_mask=True,
+        return_tensors="pt",
+    )
+    if device is not None:
+        batch = {key: value.to(device) for key, value in batch.items()}
+    return batch
 
 
 class MockRerankerScorer:
@@ -260,6 +322,7 @@ class CausalLMScorer:
         max_length: int = 4096,
         device: str | None = None,
         torch_dtype: Any | None = None,
+        attn_implementation: str | None = None,
     ):
         if torch is None or QwenCausalReranker is None:
             raise RuntimeError("torch is required for CausalLMScorer")
@@ -279,15 +342,20 @@ class CausalLMScorer:
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path,
             trust_remote_code=True,
-            padding_side="right",
+            padding_side="left",
         )
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
+        model_kwargs: dict[str, Any] = {
+            "trust_remote_code": True,
+            "torch_dtype": torch_dtype,
+        }
+        if attn_implementation:
+            model_kwargs["attn_implementation"] = attn_implementation
         model = AutoModelForCausalLM.from_pretrained(
             load_path,
-            trust_remote_code=True,
-            torch_dtype=torch_dtype,
+            **model_kwargs,
         )
         if is_adapter:
             from peft import PeftModel
@@ -310,88 +378,6 @@ class CausalLMScorer:
             batch_size=batch_size,
             device=self.device,
         )
-
-
-class SwiftGenerativeRerankerScorer:
-    """ms-swift TransformersEngine scorer for Qwen3 generative rerankers."""
-
-    backend = "swift"
-
-    def __init__(
-        self,
-        model_name_or_path: str,
-        adapters: list[str] | None = None,
-        attn_impl: str = "flash_attention_2",
-        include_instruction: bool = False,
-    ):
-        model_name_or_path = normalize_model_name_or_path(model_name_or_path)
-        try:
-            from swift.infer_engine import InferRequest, TransformersEngine
-        except ImportError as exc:
-            raise RuntimeError(
-                "ms-swift is required for --backend swift. Install it with: "
-                "pip install ms-swift -U"
-            ) from exc
-
-        self.InferRequest = InferRequest
-        engine_kwargs: dict[str, Any] = {
-            "task_type": "generative_reranker",
-            "attn_impl": attn_impl,
-        }
-        if adapters:
-            engine_kwargs["adapters"] = adapters
-        self.engine = TransformersEngine(model_name_or_path, **engine_kwargs)
-        self.include_instruction = include_instruction
-        self.raw_outputs: list[str] = []
-
-    @staticmethod
-    def _score_from_content(content: Any) -> float:
-        text = str(content).strip()
-        lowered = text.lower()
-        if lowered in {"yes", "true", "relevant"}:
-            return 1.0
-        if lowered in {"no", "false", "irrelevant"}:
-            return 0.0
-        match = re.search(r"[-+]?(?:\d*\.\d+|\d+)", text)
-        if not match:
-            logger.warning("Could not parse swift reranker score from response: %r", text)
-            return 0.0
-        value = float(match.group(0))
-        if value > 1.0:
-            value = value / 10.0
-        return float(max(0.0, min(1.0, value)))
-
-    def _request_from_input_text(self, input_text: str) -> Any:
-        instruction, query, doc = parse_input_text(input_text)
-        user_content = f"{instruction}\n{query}" if self.include_instruction and instruction else query
-        return self.InferRequest(
-            messages=[
-                {"role": "user", "content": user_content},
-                {"role": "assistant", "content": doc},
-            ]
-        )
-
-    def predict(self, input_texts: list[str], batch_size: int = 32) -> list[float]:
-        scores: list[float] = []
-        self.raw_outputs = []
-        starts = range(0, len(input_texts), batch_size)
-        total_batches = math.ceil(len(input_texts) / batch_size) if input_texts else 0
-        for start in tqdm(
-            starts,
-            total=total_batches,
-            desc="Swift scoring",
-            unit="batch",
-            dynamic_ncols=True,
-            ascii=True,
-        ):
-            batch = input_texts[start : start + batch_size]
-            infer_requests = [self._request_from_input_text(text) for text in batch]
-            responses = self.engine.infer(infer_requests)
-            for response in responses:
-                content = str(response.choices[0].message.content)
-                self.raw_outputs.append(content)
-                scores.append(self._score_from_content(content))
-        return scores
 
 
 def predict_sequence_classification_model(
@@ -447,9 +433,8 @@ def predict_causal_model(
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     wrapper.eval()
     scores: list[float] = []
-    prompts = [append_answer_prompt(text) for text in input_texts]
-    starts = range(0, len(prompts), batch_size)
-    total_batches = math.ceil(len(prompts) / batch_size) if prompts else 0
+    starts = range(0, len(input_texts), batch_size)
+    total_batches = math.ceil(len(input_texts) / batch_size) if input_texts else 0
     with torch.inference_mode():
         for start in tqdm(
             starts,
@@ -459,15 +444,13 @@ def predict_causal_model(
             dynamic_ncols=True,
             ascii=True,
         ):
-            batch = prompts[start : start + batch_size]
-            encoded = tokenizer(
+            batch = input_texts[start : start + batch_size]
+            encoded = prepare_qwen3_reranker_inputs(
+                tokenizer,
                 batch,
-                truncation=True,
-                padding=True,
                 max_length=max_length,
-                return_tensors="pt",
+                device=device,
             )
-            encoded = {key: value.to(device) for key, value in encoded.items()}
             outputs = wrapper(**encoded)
             logits = outputs["logits"].detach().float().cpu().numpy()
             scores.extend(sigmoid_array(np.asarray(logits)).tolist())
@@ -495,6 +478,7 @@ def load_causal_training_model(
     load_in_4bit: bool = False,
     device_map: Any | None = None,
     gradient_checkpointing: bool = True,
+    attn_implementation: str | None = None,
 ) -> tuple[Any, Any]:
     if torch is None or QwenCausalReranker is None:
         raise RuntimeError("torch is required for training")
@@ -505,7 +489,7 @@ def load_causal_training_model(
     tokenizer = AutoTokenizer.from_pretrained(
         model_name_or_path,
         trust_remote_code=True,
-        padding_side="right",
+        padding_side="left",
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -526,6 +510,8 @@ def load_causal_training_model(
             bnb_4bit_use_double_quant=True,
         )
         model_kwargs["device_map"] = device_map if device_map is not None else "auto"
+    if attn_implementation:
+        model_kwargs["attn_implementation"] = attn_implementation
 
     model = AutoModelForCausalLM.from_pretrained(model_name_or_path, **model_kwargs)
     if gradient_checkpointing:
@@ -571,9 +557,7 @@ def detect_backend(model_path: str, requested_backend: str = "auto") -> str:
         backend = data.get("backend")
         if backend:
             return str(backend)
-    if (path / "adapter_config.json").exists():
-        return "causal_lm"
-    return "cross_encoder"
+    return "causal_lm"
 
 
 def load_scorer(
@@ -584,9 +568,7 @@ def load_scorer(
     bf16: bool = False,
     fp16: bool = False,
     mock: bool = False,
-    adapters: list[str] | None = None,
-    swift_attn_impl: str = "flash_attention_2",
-    swift_include_instruction: bool = False,
+    attn_implementation: str | None = None,
 ) -> Any:
     if mock:
         return MockRerankerScorer(query=batch_query)
@@ -596,13 +578,6 @@ def load_scorer(
     backend = detect_backend(model_path, backend)
     logger.info("Loading reranker scorer backend=%s model=%s", backend, model_path)
 
-    if backend == "swift":
-        return SwiftGenerativeRerankerScorer(
-            model_path,
-            adapters=adapters,
-            attn_impl=swift_attn_impl,
-            include_instruction=swift_include_instruction,
-        )
     if backend == "cross_encoder":
         try:
             return CrossEncoderScorer(model_path, max_length=max_length, torch_dtype=dtype)
@@ -610,13 +585,23 @@ def load_scorer(
             if detect_backend(model_path, "auto") == "cross_encoder":
                 logger.warning("CrossEncoder load failed, falling back to causal LM: %s", exc)
                 try:
-                    return CausalLMScorer(model_path, max_length=max_length, torch_dtype=dtype)
+                    return CausalLMScorer(
+                        model_path,
+                        max_length=max_length,
+                        torch_dtype=dtype,
+                        attn_implementation=attn_implementation,
+                    )
                 except Exception as causal_exc:
                     raise RuntimeError(model_load_help(model_path, causal_exc)) from causal_exc
             raise
     if backend == "causal_lm":
         try:
-            return CausalLMScorer(model_path, max_length=max_length, torch_dtype=dtype)
+            return CausalLMScorer(
+                model_path,
+                max_length=max_length,
+                torch_dtype=dtype,
+                attn_implementation=attn_implementation,
+            )
         except Exception as exc:
             raise RuntimeError(model_load_help(model_path, exc)) from exc
     raise ValueError(f"Unknown backend: {backend}")

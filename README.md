@@ -7,6 +7,19 @@ It does not train a large model from scratch. It starts from a Qwen3 reranker
 checkpoint, formats each sample as instruction + query + document, and fits
 soft teacher labels from your query-doc-score data.
 
+The paper-aligned causal backend does not generate text. It follows the
+Qwen3-Reranker scoring path:
+
+```text
+score = softmax([logit_no, logit_yes])[yes]
+```
+
+Training optimizes the equivalent binary logit:
+
+```text
+BCEWithLogitsLoss(logit_yes - logit_no, labels / 10)
+```
+
 Default base model:
 
 ```text
@@ -25,7 +38,7 @@ This project focuses on MemReranker Stage 2:
 
 - Student initialized from a Qwen3-Reranker checkpoint.
 - Input text is instruction + query + document.
-- The model predicts a query-document relevance score.
+- The model predicts a continuous query-document relevance score in `[0, 1]`.
 - Training uses pointwise BCE soft-label distillation.
 - Original `labels` are treated as 0-10 scores and normalized as `labels / 10.0`.
 - Labels are clipped to `[0, 1]`.
@@ -67,15 +80,8 @@ pip install -r requirements.txt
 
 For QLoRA, use a Linux CUDA environment with `bitsandbytes`.
 
-For ms-swift evaluation:
-
-```bash
-pip install -r requirements-swift.txt
-```
-
-If baseline logs say `No module named 'sentence_transformers'`, the environment
-has not installed this repo's full requirements yet. Run the command above
-inside the same virtual environment that runs training/evaluation.
+The default baseline uses the causal LM yes/no-logit backend. The
+`sentence-transformers` package is kept for the optional CrossEncoder backend.
 
 If logs say `Can't load the configuration of 'Qwen/Qwen3-Reranker-0.6B'` after
 an `httpx.ProxyError` or `504 Gateway Time-out`, the model id is probably fine;
@@ -114,9 +120,11 @@ Then copy that directory to the cluster and pass it as a local path:
 
 ```bash
 python src/evaluate.py \
+  --backend causal_lm \
   --model_path /path/to/Qwen3-Reranker-0.6B \
   --test_file data/split_seed42/test.jsonl \
-  --output_dir outputs/baseline_local_model
+  --output_dir outputs/baseline_local_model \
+  --attn_implementation flash_attention_2
 ```
 
 All scoring and training loops use `tqdm` progress bars. For non-interactive
@@ -174,8 +182,10 @@ OUTPUT_DIR=outputs/baseline_qwen3_reranker_06b \
 bash scripts/eval_baseline.sh
 ```
 
-The script defaults to `PRECISION=fp16` and `BATCH_SIZE=16`. For a quick
-throughput check, inspect these fields in `overall_metrics.json`:
+The script defaults to `BACKEND=causal_lm`, `PRECISION=fp16`,
+`BATCH_SIZE=16`, and `ATTN_IMPLEMENTATION=flash_attention_2`. If flash-attn is
+not installed, set `ATTN_IMPLEMENTATION=eager`. For a quick throughput check,
+inspect these fields in `overall_metrics.json`:
 
 ```text
 score_time_seconds
@@ -185,8 +195,6 @@ examples_per_second
 
 Common reasons for slow evaluation:
 
-- The environment is missing `sentence-transformers`, so the code falls back to
-  the causal LM backend.
 - The run is on CPU, or the model was loaded in fp32 instead of fp16.
 - `batch_size=4` and `max_length=4096` are conservative and can underuse the GPU.
 - Very long documents make reranking expensive because each query-document pair
@@ -198,53 +206,31 @@ For local 0.6B model evaluation on your Linux machine:
 ```bash
 TEST_FILE=data/split_seed42/test.jsonl \
 MODEL_NAME_OR_PATH=/home/c50061497/MemOS/reranker/memranker/models/Qwen3-Reranker-0.6B \
+BACKEND=causal_lm \
 BATCH_SIZE=16 \
 MAX_LENGTH=2048 \
+ATTN_IMPLEMENTATION=flash_attention_2 \
 OUTPUT_DIR=outputs/baseline_qwen3_reranker_06b \
 bash scripts/eval_baseline.sh
 ```
 
-## ms-swift Baseline Evaluation
+## Why the old ms-swift script is disabled
 
-The ms-swift backend uses its Qwen3 generative reranker path. Install the extra
-dependency first:
+The previous ms-swift baseline used a generative reranker interface and parsed
+returned text into a numeric score. That is not equivalent to the MemReranker
+Stage 2 objective, because BCE distillation needs the continuous probability
+derived from final-token `yes/no` logits. Text parsing can turn many rows into
+hard `0/1` or `0.0`, which explains large drops in MSE, NDCG, MAP, and MRR.
 
-```bash
-pip install -r requirements-swift.txt
+The repository keeps `scripts/eval_baseline_swift.sh` only as a guardrail; it
+exits with an explanation. A future ms-swift integration should expose logits
+and compute exactly:
+
+```text
+score = softmax([logit_no, logit_yes])[yes]
 ```
 
-Then run:
-
-```bash
-TEST_FILE=data/split_seed42/test.jsonl \
-MODEL_NAME_OR_PATH=/home/c50061497/MemOS/reranker/memranker/models/Qwen3-Reranker-0.6B \
-BATCH_SIZE=32 \
-OUTPUT_DIR=outputs/baseline_qwen3_reranker_06b_swift \
-bash scripts/eval_baseline_swift.sh
-```
-
-The swift backend follows the official query/document message shape by default:
-`user=query`, `assistant=document`. It does not prepend the long `instruction`
-to the query unless you explicitly add:
-
-```bash
---swift_include_instruction
-```
-
-If metrics drop sharply, inspect `predictions.jsonl`. Swift runs include
-`raw_score_output` so you can verify whether the backend is returning numeric
-scores, `yes/no`, empty text, or another format. If many rows have score `0.0`
-and non-numeric `raw_score_output`, the parser is not reading the intended
-reranker score and ranking metrics will collapse.
-
-If `flash_attention_2` is not available in the environment, override the
-attention implementation:
-
-```bash
-SWIFT_ATTN_IMPL=eager bash scripts/eval_baseline_swift.sh
-```
-
-Outputs:
+Evaluation outputs:
 
 ```text
 overall_metrics.json
@@ -256,6 +242,7 @@ predictions.jsonl
 
 ```bash
 python src/train_pointwise.py \
+  --backend causal_lm \
   --train_file data/split_seed42/train.jsonl \
   --dev_file data/split_seed42/dev.jsonl \
   --test_file data/split_seed42/test.jsonl \
@@ -268,6 +255,7 @@ python src/train_pointwise.py \
   --gradient_accumulation_steps 8 \
   --warmup_ratio 0.03 \
   --weight_decay 0.01 \
+  --attn_implementation flash_attention_2 \
   --use_lora \
   --fp16
 ```
@@ -326,10 +314,12 @@ Use the same fixed test split:
 
 ```bash
 python src/evaluate.py \
+  --backend causal_lm \
   --model_path outputs/qwen3_reranker_4b_8x3090_lora/best \
   --test_file data/split_seed42/test.jsonl \
   --output_dir outputs/finetuned_eval \
   --max_length 2048 \
+  --attn_implementation flash_attention_2 \
   --fp16
 ```
 
@@ -372,12 +362,14 @@ Run:
 
 ```bash
 python src/predict.py \
+  --backend causal_lm \
   --model_path outputs/qwen3_reranker_4b_8x3090_lora/best \
   --instruction "Score whether the document answers the query." \
   --query "Which pocket camera ships faster?" \
   --docs_file docs.jsonl \
   --top_k 10 \
   --output_file predictions_ranked.json \
+  --attn_implementation flash_attention_2 \
   --fp16
 ```
 

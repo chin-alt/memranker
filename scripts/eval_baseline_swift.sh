@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TEST_FILE="${TEST_FILE:-data/split_seed42/test.jsonl}"
-OUTPUT_DIR="${OUTPUT_DIR:-outputs/baseline_qwen3_reranker_06b_swift}"
-MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen3-Reranker-0.6B}"
-BATCH_SIZE="${BATCH_SIZE:-32}"
-MAX_LENGTH="${MAX_LENGTH:-4096}"
-SWIFT_ATTN_IMPL="${SWIFT_ATTN_IMPL:-flash_attention_2}"
+cat >&2 <<'EOF'
+The old ms-swift generative baseline is disabled.
 
-python src/evaluate.py \
-  --backend swift \
-  --test_file "${TEST_FILE}" \
-  --model_path "${MODEL_NAME_OR_PATH}" \
-  --output_dir "${OUTPUT_DIR}" \
-  --batch_size "${BATCH_SIZE}" \
-  --max_length "${MAX_LENGTH}" \
-  --swift_attn_impl "${SWIFT_ATTN_IMPL}" \
-  "$@"
+This project now follows the MemReranker/Qwen3-Reranker scoring path:
+  score = softmax([logit_no, logit_yes])[yes]
+
+That requires access to model logits at the final assistant token. The previous
+swift script used generated text parsing, which is not equivalent to BCE
+soft-label distillation and can collapse MSE/NDCG.
+
+Use scripts/eval_baseline.sh instead. If you implement a logits-capable
+ms-swift scorer later, wire it to the same yes/no logits score definition.
+EOF
+
+exit 2

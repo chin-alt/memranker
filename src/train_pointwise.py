@@ -18,10 +18,10 @@ from data import RerankerExample, load_dataset_splits, load_examples
 from metrics import compute_all_metrics, is_better_metric
 from modeling import (
     DEFAULT_MODEL_NAME,
-    append_answer_prompt,
     load_causal_training_model,
     model_load_help,
     normalize_model_name_or_path,
+    prepare_qwen3_reranker_inputs,
     predict_causal_model,
     predict_sequence_classification_model,
     save_reranker_config,
@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split_file", default=None, help="Optional JSON split file with train/dev/test group keys.")
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--model_name_or_path", default=DEFAULT_MODEL_NAME)
-    parser.add_argument("--backend", default="auto", choices=["auto", "cross_encoder", "causal_lm"])
+    parser.add_argument("--backend", default="causal_lm", choices=["auto", "cross_encoder", "causal_lm"])
     parser.add_argument("--max_length", type=int, default=4096)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=2e-5)
@@ -72,6 +72,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--default_instruction", default="")
     add_bool_arg(parser, "gradient_checkpointing", default=True, help_text="Enable gradient checkpointing")
     parser.add_argument("--load_in_4bit", action="store_true", help="Enable QLoRA-style 4-bit loading for causal backend.")
+    parser.add_argument(
+        "--attn_implementation",
+        default=None,
+        help="Optional transformers attention backend, for example flash_attention_2 or eager.",
+    )
     parser.add_argument("--logging_steps", type=int, default=10)
     parser.add_argument("--disable_tqdm", action="store_true", help="Disable tqdm progress bars.")
     parser.add_argument(
@@ -290,12 +295,14 @@ def save_best_causal(
             "backend": "causal_lm",
             "base_model_name_or_path": args.model_name_or_path,
             "max_length": args.max_length,
-            "answer_prompt": "<Answer>:",
-            "score": "sigmoid(logit_yes - logit_no)",
-            "loss": "BCEWithLogitsLoss",
+            "prompt_format": "Qwen3-Reranker chat prefix + <Instruct>/<Query>/<Document> + assistant think suffix",
+            "score": "softmax([logit_no, logit_yes])[yes]",
+            "logit_equivalent": "sigmoid(logit_yes - logit_no)",
+            "loss": "BCEWithLogitsLoss(logit_yes - logit_no, soft_label)",
             "label_normalization": "labels / 10 clipped to [0, 1]",
             "use_lora": args.use_lora,
             "load_in_4bit": args.load_in_4bit,
+            "attn_implementation": args.attn_implementation,
             "distributed": {
                 "num_processes": accelerator.num_processes,
                 "mixed_precision": accelerator.mixed_precision,
@@ -443,6 +450,7 @@ def train_causal_lm(
             load_in_4bit=args.load_in_4bit,
             device_map=_kbit_device_map_for_process(args, accelerator),
             gradient_checkpointing=args.gradient_checkpointing,
+            attn_implementation=args.attn_implementation,
         )
     except Exception as exc:
         raise RuntimeError(model_load_help(args.model_name_or_path, exc)) from exc
@@ -453,12 +461,10 @@ def train_causal_lm(
         logger.warning("Dev split is empty; evaluating on %s split.", "test" if splits["test"] else "train")
 
     def collate(batch: list[RerankerExample]) -> dict[str, Any]:
-        encoded = tokenizer(
-            [append_answer_prompt(ex.input_text) for ex in batch],
-            truncation=True,
-            padding=True,
+        encoded = prepare_qwen3_reranker_inputs(
+            tokenizer,
+            [ex.input_text for ex in batch],
             max_length=args.max_length,
-            return_tensors="pt",
         )
         encoded["labels"] = torch.tensor([ex.label for ex in batch], dtype=torch.float32)
         return encoded
@@ -537,7 +543,7 @@ def train(
     splits: dict[str, list[RerankerExample]],
     accelerator: Any,
 ) -> dict[str, float]:
-    backend_order = ["cross_encoder", "causal_lm"] if args.backend == "auto" else [args.backend]
+    backend_order = ["causal_lm", "cross_encoder"] if args.backend == "auto" else [args.backend]
     errors = []
     for backend in backend_order:
         try:
