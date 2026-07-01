@@ -499,6 +499,15 @@ def main() -> None:
     )
     metrics.update(
         {
+            "model_path": args.model_path,
+            "gt_file": args.gt_file,
+            "recall_file": args.recall_file,
+            "gt_query_col": args.gt_query_col,
+            "gt_doc_id_col": args.gt_doc_id_col,
+            "max_length": args.max_length,
+            "batch_size": args.batch_size,
+            "precision": "bf16" if args.bf16 else "fp16" if args.fp16 else "fp32",
+            "attn_implementation": args.attn_implementation or "",
             "score_time_seconds": float(score_time),
             "seconds_per_example": float(sec_per_example),
             "examples_per_second": float(examples_per_sec),

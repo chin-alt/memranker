@@ -437,6 +437,56 @@ IDs, hit IDs, missing IDs, per-query accuracy, and estimated inference time.
 Business metrics are averaged over all ground-truth queries, so a query with no
 matched recalled docs contributes zero instead of silently disappearing.
 
+### Business Evaluation Matrix
+
+To compare the three business datasets across the five local models requested
+for the latency-delay experiment, run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+MAX_LENGTH=2048 \
+BATCH_SIZE=8 \
+PRECISION=fp16 \
+ATTN_IMPLEMENTATION=flash_attention_2 \
+bash scripts/eval_business_matrix.sh
+```
+
+The matrix script evaluates:
+
+```text
+models/IAAR-Shanghai/MemReranker-4B
+models/Qwen3-Reranker-0.6B
+models/Qwen3-Reranker-4B
+outputs/qwen3_reranker_4b_8x3090_lora/best
+outputs/qwen3_reranker_06b_lora/best
+```
+
+against:
+
+```text
+data/latency_delay/0428caption
+data/latency_delay/0428keyword
+data/latency_delay/0625caption
+```
+
+The first two datasets use `--gt_doc_id_col PageId_new`; `0625caption` uses the
+default `PageId`. Each dataset/model pair gets its own output directory and
+also a uniquely named copy under `OUTPUT_ROOT`. The final comparison tables are:
+
+```text
+summary_metrics.xlsx
+summary_metrics.csv
+summary_metrics.json
+```
+
+If a long matrix run is interrupted, rerun the same command with the same
+`OUTPUT_ROOT`; by default `SKIP_EXISTING=1` skips pairs that already have
+`metrics.json`. You can rebuild only the summary table with:
+
+```bash
+python src/summarize_business_matrix.py --output_root outputs/business_matrix_xxx
+```
+
 ## Prediction
 
 Prepare `docs.jsonl`:
