@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import logging
 import math
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from data import format_input_text, record_to_doc, write_jsonl
-from modeling import DEFAULT_MODEL_NAME, load_scorer
+from modeling import DEFAULT_MODEL_NAME, load_scorer, torch
 
 
 logger = logging.getLogger(__name__)
@@ -439,6 +440,13 @@ def write_summary_xlsx(path: Path, rows: list[dict[str, Any]]) -> bool:
     return True
 
 
+def cleanup_cuda_memory() -> None:
+    gc.collect()
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
     args = parse_args()
@@ -527,6 +535,8 @@ def main() -> None:
         json.dumps(metrics, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    del scorer
+    cleanup_cuda_memory()
 
     logger.info("Wrote business evaluation outputs to %s", output_dir)
     print(json.dumps(metrics, ensure_ascii=False, indent=2))

@@ -445,7 +445,7 @@ for the latency-delay experiment, run:
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
 MAX_LENGTH=2048 \
-BATCH_SIZE=8 \
+BATCH_SIZE=4 \
 PRECISION=fp16 \
 ATTN_IMPLEMENTATION=flash_attention_2 \
 bash scripts/eval_business_matrix.sh
@@ -486,6 +486,12 @@ If a long matrix run is interrupted, rerun the same command with the same
 ```bash
 python src/summarize_business_matrix.py --output_root outputs/business_matrix_xxx
 ```
+
+The matrix script launches one Python process per dataset/model pair, so GPU
+memory is released between runs when that process exits. `evaluate_business.py`
+also clears the CUDA cache after writing outputs. If a 4B run still OOMs, lower
+`BATCH_SIZE` first, then `MAX_LENGTH`; if memory is plentiful, raise
+`BATCH_SIZE` to improve throughput.
 
 ## Prediction
 

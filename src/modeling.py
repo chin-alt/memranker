@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import re
+import inspect
 
 from pathlib import Path
 from typing import Any
@@ -207,6 +208,13 @@ if torch is not None:
                 if yes_token_id is not None and no_token_id is not None
                 else resolve_yes_no_token_ids(tokenizer)
             )
+            try:
+                forward_params = inspect.signature(model.forward).parameters
+            except (TypeError, ValueError):
+                forward_params = {}
+            self._supports_use_cache = "use_cache" in forward_params
+            self._supports_logits_to_keep = "logits_to_keep" in forward_params
+            self._supports_num_logits_to_keep = "num_logits_to_keep" in forward_params
             self.loss_fn = torch.nn.BCEWithLogitsLoss()
 
         def forward(
@@ -215,13 +223,27 @@ if torch is not None:
             attention_mask: Any,
             labels: Any | None = None,
         ) -> dict[str, Any]:
-            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-            last_indices = attention_mask.size(1) - 1 - torch.argmax(
-                attention_mask.flip(dims=[1]).long(),
-                dim=1,
-            )
-            batch_indices = torch.arange(input_ids.size(0), device=input_ids.device)
-            last_logits = outputs.logits[batch_indices, last_indices, :]
+            model_kwargs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+            }
+            if self._supports_use_cache:
+                model_kwargs["use_cache"] = False
+            if self._supports_logits_to_keep:
+                model_kwargs["logits_to_keep"] = 1
+            elif self._supports_num_logits_to_keep:
+                model_kwargs["num_logits_to_keep"] = 1
+
+            outputs = self.model(**model_kwargs)
+            if self._supports_logits_to_keep or self._supports_num_logits_to_keep:
+                last_logits = outputs.logits[:, -1, :]
+            else:
+                last_indices = attention_mask.size(1) - 1 - torch.argmax(
+                    attention_mask.flip(dims=[1]).long(),
+                    dim=1,
+                )
+                batch_indices = torch.arange(input_ids.size(0), device=input_ids.device)
+                last_logits = outputs.logits[batch_indices, last_indices, :]
             yes_logits = last_logits[:, self.yes_token_id]
             no_logits = last_logits[:, self.no_token_id]
             logits = yes_logits - no_logits

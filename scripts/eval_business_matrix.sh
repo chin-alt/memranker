@@ -9,11 +9,12 @@ Environment overrides:
   OUTPUT_ROOT           Output root. Default: outputs/business_matrix_<timestamp>
   CUDA_VISIBLE_DEVICES  GPU ids for evaluation. Default: 0
   MAX_LENGTH            Max sequence length. Default: 2048
-  BATCH_SIZE            Inference batch size. Default: 8
+  BATCH_SIZE            Inference batch size. Default: 4
   PRECISION             fp16, bf16, or fp32. Default: fp16
   ATTN_IMPLEMENTATION   transformers attention backend. Default: flash_attention_2
   SKIP_EXISTING         Skip a run if metrics.json already exists. Default: 1
   CONTINUE_ON_ERROR     Continue remaining runs after one failure. Default: 0
+  POST_RUN_SLEEP        Seconds to wait after each run. Default: 2
   PYTHON_BIN            Python executable. Default: python
 
 Outputs:
@@ -43,7 +44,7 @@ export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/business_matrix_${RUN_TAG}}"
 MAX_LENGTH="${MAX_LENGTH:-2048}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
 PRECISION="${PRECISION:-fp16}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 INSTRUCTION="${INSTRUCTION:-Given a user query, retrieve relevant documents that answer the query.}"
@@ -51,6 +52,7 @@ GT_QUERY_COL="${GT_QUERY_COL:-query}"
 TOP_K_LIST="${TOP_K_LIST:-1 3 5 10}"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 CONTINUE_ON_ERROR="${CONTINUE_ON_ERROR:-0}"
+POST_RUN_SLEEP="${POST_RUN_SLEEP:-2}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
 MODEL_NAMES=(
@@ -164,6 +166,9 @@ run_one() {
     "${attn_args[@]}"
 
   copy_named_outputs "${run_dir}" "${run_name}"
+  if [[ "${POST_RUN_SLEEP}" != "0" ]]; then
+    sleep "${POST_RUN_SLEEP}"
+  fi
 }
 
 for dataset_idx in "${!DATASET_NAMES[@]}"; do
