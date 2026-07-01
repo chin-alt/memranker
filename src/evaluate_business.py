@@ -5,9 +5,11 @@ import csv
 import json
 import logging
 import math
+import re
 import time
 
 from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_BUSINESS_INSTRUCTION = (
     "Given a user query, retrieve relevant documents that answer the query."
 )
+DOC_ID_SPLIT_RE = re.compile(r"[,，、;；\n\r\t]+")
+
+
+@dataclass
+class GroundTruthItem:
+    query: str
+    raw_page_ids: str = ""
+    doc_ids: list[str] = field(default_factory=list)
+
+    @property
+    def doc_id_set(self) -> set[str]:
+        return set(self.doc_ids)
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,13 +75,44 @@ def clean_cell(value: Any) -> str:
     return str(value).strip()
 
 
+def split_doc_ids(value: Any) -> list[str]:
+    raw = clean_cell(value)
+    if not raw:
+        return []
+    doc_ids: list[str] = []
+    seen: set[str] = set()
+    for part in DOC_ID_SPLIT_RE.split(raw):
+        doc_id = clean_cell(part).strip(" \u3000")
+        if not doc_id or doc_id in seen:
+            continue
+        seen.add(doc_id)
+        doc_ids.append(doc_id)
+    return doc_ids
+
+
+def add_ground_truth_item(
+    gt: dict[str, GroundTruthItem],
+    query: str,
+    raw_page_ids: str,
+    doc_ids: list[str],
+) -> None:
+    item = gt.setdefault(query, GroundTruthItem(query=query))
+    if raw_page_ids:
+        item.raw_page_ids = raw_page_ids if not item.raw_page_ids else f"{item.raw_page_ids}，{raw_page_ids}"
+    seen = set(item.doc_ids)
+    for doc_id in doc_ids:
+        if doc_id not in seen:
+            item.doc_ids.append(doc_id)
+            seen.add(doc_id)
+
+
 def load_ground_truth(
     gt_file: str | Path,
     query_col: str,
     doc_id_col: str,
     sheet_name: str | None = None,
-) -> dict[str, set[str]]:
-    gt: dict[str, set[str]] = defaultdict(set)
+) -> dict[str, GroundTruthItem]:
+    gt: dict[str, GroundTruthItem] = {}
     skipped = 0
     path = Path(gt_file)
 
@@ -80,11 +125,12 @@ def load_ground_truth(
                 raise ValueError(f"Ground-truth file missing columns: {missing}. Found: {fieldnames}")
             for row in reader:
                 query = clean_cell(row.get(query_col))
-                doc_id = clean_cell(row.get(doc_id_col))
-                if not query or not doc_id:
+                raw_page_ids = clean_cell(row.get(doc_id_col))
+                doc_ids = split_doc_ids(raw_page_ids)
+                if not query or not doc_ids:
                     skipped += 1
                     continue
-                gt[query].add(doc_id)
+                add_ground_truth_item(gt, query, raw_page_ids, doc_ids)
     else:
         try:
             from openpyxl import load_workbook
@@ -112,11 +158,12 @@ def load_ground_truth(
         doc_id_idx = headers.index(doc_id_col)
         for row in sheet.iter_rows(min_row=2, values_only=True):
             query = clean_cell(row[query_idx] if query_idx < len(row) else None)
-            doc_id = clean_cell(row[doc_id_idx] if doc_id_idx < len(row) else None)
-            if not query or not doc_id:
+            raw_page_ids = clean_cell(row[doc_id_idx] if doc_id_idx < len(row) else None)
+            doc_ids = split_doc_ids(raw_page_ids)
+            if not query or not doc_ids:
                 skipped += 1
                 continue
-            gt[query].add(doc_id)
+            add_ground_truth_item(gt, query, raw_page_ids, doc_ids)
 
     if skipped:
         logger.warning("Skipped %d ground-truth rows with empty query/doc id", skipped)
@@ -207,7 +254,7 @@ def load_recall_results(
 
 def build_scoring_inputs(
     recall_results: dict[str, list[dict[str, str]]],
-    ground_truth: dict[str, set[str]],
+    ground_truth: dict[str, GroundTruthItem],
     instruction: str,
 ) -> tuple[list[str], list[dict[str, Any]], int]:
     input_texts: list[str] = []
@@ -236,17 +283,19 @@ def build_scoring_inputs(
 def attach_scores_and_ranks(
     mapping: list[dict[str, Any]],
     scores: list[float],
-    ground_truth: dict[str, set[str]],
+    ground_truth: dict[str, GroundTruthItem],
     save_doc_text: bool,
 ) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row, score in zip(mapping, scores, strict=False):
+        gt_item = ground_truth.get(row["query"])
+        gt_ids = gt_item.doc_id_set if gt_item is not None else set()
         item = {
             "query": row["query"],
             "doc_id": row["doc_id"],
             "score": float(score),
             "source_rank": row["source_rank"],
-            "is_relevant": row["doc_id"] in ground_truth.get(row["query"], set()),
+            "is_relevant": row["doc_id"] in gt_ids,
         }
         if save_doc_text:
             item["doc"] = row["doc"]
@@ -264,10 +313,29 @@ def attach_scores_and_ranks(
     return ranked
 
 
+def join_ids(values: list[str]) -> str:
+    return "，".join(values)
+
+
+SUMMARY_COLUMNS = [
+    "query",
+    "PageId",
+    "正确标签数量",
+    "召回候选数量",
+    "模型召回的ID",
+    "命中ID",
+    "漏召ID",
+    "命中数量",
+    "准确率",
+    "推理时间(s)",
+]
+
+
 def compute_business_metrics(
     ranked_predictions: list[dict[str, Any]],
-    ground_truth: dict[str, set[str]],
+    ground_truth: dict[str, GroundTruthItem],
     top_k_list: list[int],
+    seconds_per_example: float,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for pred in ranked_predictions:
@@ -279,13 +347,34 @@ def compute_business_metrics(
         "num_scored_queries": len(grouped),
         "num_scored_pairs": len(ranked_predictions),
     }
+    accuracy_sum = 0.0
+    total_hits_at_label_count = 0
+    total_gt_docs = 0
 
-    for query, gt_doc_ids in ground_truth.items():
+    for query, gt_item in ground_truth.items():
+        gt_doc_ids = gt_item.doc_id_set
         preds = sorted(grouped.get(query, []), key=lambda row: int(row.get("rank", 10**9)))
+        label_count = len(gt_item.doc_ids)
+        model_top_by_label_count = preds[:label_count]
+        model_top_ids = [str(pred["doc_id"]) for pred in model_top_by_label_count]
+        model_top_id_set = set(model_top_ids)
+        hit_ids = [doc_id for doc_id in model_top_ids if doc_id in gt_doc_ids]
+        missed_ids = [doc_id for doc_id in gt_item.doc_ids if doc_id not in model_top_id_set]
+        hits_at_label_count = len(set(model_top_ids) & gt_doc_ids)
+        accuracy_at_label_count = hits_at_label_count / label_count if label_count else 0.0
+        estimated_query_time = len(preds) * seconds_per_example
+
         row: dict[str, Any] = {
             "query": query,
-            "num_gt_docs": len(gt_doc_ids),
-            "num_recalled_docs": len(preds),
+            "PageId": gt_item.raw_page_ids or join_ids(gt_item.doc_ids),
+            "正确标签数量": label_count,
+            "召回候选数量": len(preds),
+            "模型召回的ID": join_ids(model_top_ids),
+            "命中ID": join_ids(hit_ids),
+            "漏召ID": join_ids(missed_ids),
+            "命中数量": hits_at_label_count,
+            "准确率": accuracy_at_label_count,
+            "推理时间(s)": estimated_query_time,
         }
         first_hit_rank = next((int(pred["rank"]) for pred in preds if pred["doc_id"] in gt_doc_ids), 0)
         row["MRR"] = 0.0 if first_hit_rank == 0 else 1.0 / first_hit_rank
@@ -303,14 +392,51 @@ def compute_business_metrics(
             row[f"HitRate@{top_k}"] = 1.0 if hits > 0 else 0.0
 
         per_query_rows.append(row)
+        accuracy_sum += accuracy_at_label_count
+        total_hits_at_label_count += hits_at_label_count
+        total_gt_docs += label_count
 
     denom = max(1, len(per_query_rows))
+    metrics["Accuracy@GTCount"] = accuracy_sum / denom
+    metrics["MicroAccuracy@GTCount"] = total_hits_at_label_count / total_gt_docs if total_gt_docs else 0.0
+    metrics["total_gt_docs"] = total_gt_docs
+    metrics["total_hits_at_gt_count"] = total_hits_at_label_count
     metrics["MRR"] = sum(float(row["MRR"]) for row in per_query_rows) / denom
     for top_k in top_k_list:
         for name in ("Precision", "Recall", "F1", "HitRate"):
             key = f"{name}@{top_k}"
             metrics[key] = sum(float(row[key]) for row in per_query_rows) / denom
     return metrics, per_query_rows
+
+
+def write_summary_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def write_summary_xlsx(path: Path, rows: list[dict[str, Any]]) -> bool:
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        logger.warning("openpyxl is not installed; skipped xlsx summary output.")
+        return False
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "business_eval"
+    sheet.append(SUMMARY_COLUMNS)
+    for row in rows:
+        sheet.append([row.get(col, "") for col in SUMMARY_COLUMNS])
+    for column_cells in sheet.columns:
+        max_length = max(len(str(cell.value or "")) for cell in column_cells)
+        sheet.column_dimensions[column_cells[0].column_letter].width = min(max(12, max_length + 2), 60)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(path)
+    return True
 
 
 def main() -> None:
@@ -369,6 +495,7 @@ def main() -> None:
         ranked_predictions,
         ground_truth,
         args.top_k_list,
+        seconds_per_example=sec_per_example,
     )
     metrics.update(
         {
@@ -381,12 +508,16 @@ def main() -> None:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    write_jsonl(output_dir / "per_query_metrics.jsonl", per_query)
+    write_jsonl(output_dir / "predictions.jsonl", ranked_predictions)
+    write_summary_csv(output_dir / "business_eval.csv", per_query)
+    wrote_xlsx = write_summary_xlsx(output_dir / "business_eval.xlsx", per_query)
+    metrics["summary_csv"] = str(output_dir / "business_eval.csv")
+    metrics["summary_xlsx"] = str(output_dir / "business_eval.xlsx") if wrote_xlsx else ""
     (output_dir / "metrics.json").write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    write_jsonl(output_dir / "per_query_metrics.jsonl", per_query)
-    write_jsonl(output_dir / "predictions.jsonl", ranked_predictions)
 
     logger.info("Wrote business evaluation outputs to %s", output_dir)
     print(json.dumps(metrics, ensure_ascii=False, indent=2))

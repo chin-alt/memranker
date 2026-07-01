@@ -363,6 +363,13 @@ query column: query
 doc id column: PageId
 ```
 
+`PageId` can contain multiple correct IDs in one cell, separated by Chinese or
+English commas, for example:
+
+```text
+dy_PDP_32，dy_PDP_33，dy_PDP_31，dy_PDP_34
+```
+
 Recall JSON may be either:
 
 ```json
@@ -414,8 +421,19 @@ Outputs:
 metrics.json
 per_query_metrics.jsonl
 predictions.jsonl
+business_eval.xlsx
+business_eval.csv
 ```
 
+For each query, if the ground truth has `N` correct IDs, the script takes the
+model's top-`N` reranked IDs and computes:
+
+```text
+accuracy = number of hit IDs / N
+```
+
+The xlsx summary keeps the original `query` and `PageId`, plus model recalled
+IDs, hit IDs, missing IDs, per-query accuracy, and estimated inference time.
 Business metrics are averaged over all ground-truth queries, so a query with no
 matched recalled docs contributes zero instead of silently disappearing.
 
